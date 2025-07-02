@@ -1,6 +1,11 @@
 package com.lamsili.canc.app;
 
 import com.lamsili.canc.classifier.CANCLearnerMOA;
+import com.lamsili.canc.fca.closure.ClosureOperator;
+import com.lamsili.canc.fca.concept.FormalConcept;
+import com.lamsili.canc.fca.context.NominalContext;
+
+import com.lamsili.canc.rules.Rule;
 import com.lamsili.canc.varriants.Variant;
 import moa.core.Example;
 import moa.core.TimingUtils;
@@ -10,12 +15,13 @@ import moa.streams.ArffFileStream;
 import com.yahoo.labs.samoa.instances.*;
 
 import java.text.DecimalFormat;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
 import java.util.ArrayList;
-
-// Imports pour Weka et le filtre de discrétisation
-import weka.filters.Filter;
-import weka.filters.unsupervised.attribute.Discretize;
-import weka.core.Instances;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * TestCANCStream - Classe pour tester le classifieur CANC en apprentissage
@@ -24,574 +30,336 @@ import weka.core.Instances;
 public class TestCANCStream {
 
     // Configuration par défaut
-    private static final String DEFAULT_DATASET_PATH = "C:\\Users\\lamsilibil\\Downloads\\airlines.arff\\airlines.arff";
+    private static final String DEFAULT_DATASET_PATH = "C:\\Users\\lamsilibil\\IdeaProjects\\Canc_MOA\\src\\main\\resources\\weather.nominal.arff";
     private static final int DEFAULT_CLASS_INDEX = -1;  // -1 signifie dernier attribut
-    private static final int DEFAULT_INSTANCES = 100000;         // Limité à 100k instances pour des performances raisonnables
-    private static final int DEFAULT_GRACE_PERIOD = 2000;        // Période de grâce augmentée pour les grands datasets
-    private static final boolean DEFAULT_ENABLE_RESET = false;    // Activer le reset périodique pour gérer la mémoire
-    private static final int DEFAULT_RESET_FREQUENCY = 10;     // Reset tous les 10% des instances traitées
-    private static final Variant DEFAULT_VARIANT = Variant.CpNC_CORV; // Variante par défaut
-    private static final int DISPLAY_FREQUENCY = 5000;           // Affichage moins fréquent pour de grands jeux de données
+    private static final int DEFAULT_INSTANCES = 14;
+    private static final boolean DEFAULT_ENABLE_RESET = false;
+    private static final Variant DEFAULT_VARIANT = Variant.CpNC_CORV;
 
-    // Filtre de discrétisation par défaut
-    protected static Filter m_Filter = new weka.filters.unsupervised.attribute.Discretize();
+    // Taille du chunk représente un "mini-dataset" sur lequel le modèle est appliqué
+    private static final int DEFAULT_CHUNK_SIZE = 14;
 
-    // Contrôle de l'activation de la discrétisation
-    private static boolean m_DiscreteEnabled = true;
+    // Règles disjointes: si true, génère autant de règles que d'attributs pour chaque concept
+    private static final boolean USE_DISJOINT_RULES = false;
 
+    // Options de contrôle d'affichage
+    private static boolean SHOW_FINAL_RESULTS = false;
+
+    // Structure pour stocker les concepts par chunk
+    private static Map<Integer, String> conceptDescriptionsByChunk = new HashMap<>();
+    // Structure pour stocker les règles par chunk
+    private static Map<Integer, List<Rule>> rulesByChunk = new HashMap<>();
+
+    // Méthode d'évaluation à utiliser (INFORMATION_GAIN ou GAIN_RATIO)
+    private static final com.lamsili.canc.fca.closure.ClosureOperator.AttributeEvalMethod EVAL_METHOD =
+        ClosureOperator.AttributeEvalMethod.INFORMATION_GAIN;
+        // Pour passer au gain ratio, changez simplement la ligne ci-dessus en:
+        // com.lamsili.canc.fca.closure.ClosureOperator.AttributeEvalMethod.GAIN_RATIO;
+
+    // Méthode d'évaluation des valeurs à utiliser (ENTROPY ou SUPPORT)
+    private static final com.lamsili.canc.fca.closure.ClosureOperator.ValueEvalMethod VALUE_EVAL_METHOD =
+        ClosureOperator.ValueEvalMethod.SUPPORT;
+        // Pour utiliser le support (nombre d'occurrences), changez la ligne ci-dessus en:
+        // ClosureOperator.ValueEvalMethod.SUPPORT;
+
+    // Format des nombres décimaux avec 4 décimales après la virgule
     private static final DecimalFormat df = new DecimalFormat("0.0000");
 
-    /**
-     * Définit le filtre à utiliser pour la discrétisation
-     * @param filter Le filtre à utiliser
-     */
-    public static void setFilter(Filter filter) {
-        m_Filter = filter;
-    }
-
-    /**
-     * Récupère le filtre actuel
-     * @return Le filtre configuré
-     */
-    public static Filter getFilter() {
-        return m_Filter;
-    }
-
-    /**
-     * Active ou désactive la discrétisation
-     * @param enabled true pour activer, false pour désactiver
-     */
-    public static void setDiscretizeEnabled(boolean enabled) {
-        m_DiscreteEnabled = enabled;
-    }
-
-    /**
-     * Vérifie si la discrétisation est activée
-     * @return true si la discrétisation est activée, false sinon
-     */
-    public static boolean isDiscretizeEnabled() {
-        return m_DiscreteEnabled;
-    }
-
-    /**
-     * Récupère la spécification du filtre sous forme de chaîne
-     * @return La spécification du filtre
-     */
-    protected static String getFilterSpec() {
-        Filter c = getFilter();
-        if (c instanceof weka.core.OptionHandler) {
-            return c.getClass().getName() + " "
-                    + weka.core.Utils.joinOptions(((weka.core.OptionHandler)c).getOptions());
-        }
-        return c.getClass().getName();
+    static {
+        // Forcer l'utilisation du point comme séparateur décimal
+        df.setDecimalFormatSymbols(new java.text.DecimalFormatSymbols(java.util.Locale.US));
     }
 
     public static void main(String[] args) {
-        // Activer le débogage
-        CANCDebugger.setDebugEnabled(false);
+        // Activer le débogage - mettre à true pour voir les détails complets
+        CANCDebugger.setDebugEnabled(true);
+
+        // Définir la méthode d'évaluation d'attribut à utiliser (gain d'information ou gain ratio)
+        CANCDebugger.setAttributeEvalMethod(EVAL_METHOD);
+
+        // Définir la méthode d'évaluation des valeurs à utiliser (entropy ou support)
+        if (VALUE_EVAL_METHOD != null) {
+            CANCDebugger.setValueEvalMethod(VALUE_EVAL_METHOD);
+        }
+
+        // Définir le mode de génération des règles (disjointes ou non)
+        CANCDebugger.setUseDisjointRules(USE_DISJOINT_RULES);
 
         // Utiliser les paramètres par défaut
         int numInstances = DEFAULT_INSTANCES;
+        int chunkSize = DEFAULT_CHUNK_SIZE;
+
+        // Informer le debugger que nous utilisons le mode chunk
+        CANCDebugger.setChunksMode(true);
+
+        // Afficher des informations sur la configuration de débogage
+        if (CANCDebugger.isDebugEnabled()) {
+            System.out.println("\n=== CONFIGURATION DU DÉBOGAGE ===");
+            System.out.println("Mode debug: ACTIVÉ");
+            System.out.println("Méthode d'évaluation d'attributs: " + EVAL_METHOD);
+            System.out.println("Méthode d'évaluation des valeurs: " + VALUE_EVAL_METHOD);
+            System.out.println("Règles disjointes: " + USE_DISJOINT_RULES);
+            System.out.println("Variante par défaut: " + DEFAULT_VARIANT);
+            System.out.println("Mode chunks activé: OUI");
+        }
 
         System.out.println("\n=== PRÉPARATION DES DONNÉES ===");
         System.out.println("Chargement du fichier: " + DEFAULT_DATASET_PATH);
+        System.out.println("Mode de traitement: CHUNK");
 
         // Charger le flux de données à partir du fichier ARFF
         ArffFileStream dataStream = new ArffFileStream(DEFAULT_DATASET_PATH, DEFAULT_CLASS_INDEX);
         dataStream.prepareForUse();
 
-        // Vérifier les attributs du jeu de données original
-        checkNominalAttributes(dataStream.getHeader(), "ORIGINAL");
+        System.out.println("\n=== EXÉCUTION DE L'APPRENTISSAGE ===");
 
-        // Appliquer le filtre de discrétisation pour transformer les attributs numériques en nominaux
-        System.out.println("\n=== DISCRÉTISATION DES DONNÉES ===");
-        System.out.println("Application du filtre de discrétisation...");
-        ArffFileStream discretizedStream = applyDiscretizationFilter(dataStream);
+        // Réinitialiser les collections pour les concepts et les règles
+        conceptDescriptionsByChunk.clear();
+        rulesByChunk.clear();
 
-        // Vérifier les attributs après discrétisation
-        checkNominalAttributes(discretizedStream.getHeader(), "APRÈS DISCRÉTISATION");
+        // Exécuter l'apprentissage en mode chunk
+        runChunkEvaluation(dataStream, DEFAULT_VARIANT, numInstances,
+                        DEFAULT_ENABLE_RESET, chunkSize);
+    }
 
-        // Vérifier qu'on a bien des données discrétisées (tous les attributs numériques convertis en nominaux)
-        boolean allNominal = checkAllAttributesNominal(discretizedStream.getHeader());
-        if (allNominal) {
-            System.out.println("\n✅ SUCCÈS: Tous les attributs sont maintenant nominaux.");
+    /**
+     * Exécute une évaluation par chunks (mini-batches) sur un flux de données
+     * Cette version traite chaque chunk de manière complètement indépendante
+     */
+    private static void runChunkEvaluation(InstanceStream stream, Variant variant, int maxInstances, boolean enableReset, int chunkSize) {
+
+        boolean isDebugEnabled = CANCDebugger.isDebugEnabled();
+
+        if (isDebugEnabled) {
+            System.out.println("\n=== DÉMARRAGE DU TEST EN MODE CHUNK (INDÉPENDANT) ===");
+            System.out.println("Source: Fichier ARFF");
+            System.out.println("Variante CANC: " + variant);
+            System.out.println("Instances à traiter: " + maxInstances);
+            System.out.println("Taille de chunk: " + chunkSize + " instances par chunk");
+            System.out.println("Méthode d'évaluation: " + CANCDebugger.getAttributeEvalMethod());
+            System.out.println("=========================================\n");
         } else {
-            System.out.println("\n⚠️ ATTENTION: Certains attributs sont encore numériques. La discrétisation n'a pas été complète.");
+            System.out.println("\n=== APPRENTISSAGE EN MODE CHUNK ===");
+            System.out.println("Variante: " + variant + ", Instances: " + maxInstances + ", Taille de chunk: " + chunkSize);
         }
-
-        // Lancer le test en batch avec les données discrétisées
-        System.out.println("\n=== EXÉCUTION DE L'APPRENTISSAGE SUR LES DONNÉES DISCRÉTISÉES ===");
-        runBatchEvaluation(discretizedStream, DEFAULT_VARIANT, numInstances, DEFAULT_GRACE_PERIOD, DEFAULT_ENABLE_RESET);
-    }
-
-    /**
-     * Vérifie que tous les attributs (sauf peut-être la classe) sont nominaux
-     * @param header Les en-têtes des attributs à vérifier
-     * @return true si tous les attributs (sauf peut-être la classe) sont nominaux
-     */
-    private static boolean checkAllAttributesNominal(Object header) {
-        if (header instanceof weka.core.Instances) {
-            weka.core.Instances wekaHeader = (weka.core.Instances) header;
-            int numAttributes = wekaHeader.numAttributes();
-            int classIndex = wekaHeader.classIndex();
-
-            for (int i = 0; i < numAttributes; i++) {
-                if (i != classIndex && !wekaHeader.attribute(i).isNominal()) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        else if (header instanceof com.yahoo.labs.samoa.instances.InstancesHeader) {
-            com.yahoo.labs.samoa.instances.InstancesHeader samoaHeader = (com.yahoo.labs.samoa.instances.InstancesHeader) header;
-            int numAttributes = samoaHeader.numAttributes();
-            int classIndex = samoaHeader.classIndex();
-
-            for (int i = 0; i < numAttributes; i++) {
-                if (i != classIndex && !samoaHeader.attribute(i).isNominal()) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * Vérifie que le jeu de données contient des attributs nominaux
-     * et affiche des informations sur ces attributs
-     * @param header Les en-têtes des attributs à vérifier
-     * @param stage Étape du traitement (ex: "ORIGINAL", "APRÈS DISCRÉTISATION")
-     */
-    private static void checkNominalAttributes(Object header, String stage) {
-        int numAttributes = 0;
-        int numNominal = 0;
-        int numNumeric = 0;
-        int classIndex = -1;
-        String className = "";
-
-        // Traiter différemment selon le type d'instance
-        if (header instanceof weka.core.Instances) {
-            weka.core.Instances wekaHeader = (weka.core.Instances) header;
-            numAttributes = wekaHeader.numAttributes();
-            classIndex = wekaHeader.classIndex();
-            if (classIndex >= 0) {
-                className = wekaHeader.classAttribute().name();
-            }
-
-            System.out.println("\n=== INFORMATIONS SUR LE JEU DE DONNÉES (" + stage + ") ===");
-            if (stage.equals("ORIGINAL")) {
-                System.out.println("Fichier: " + DEFAULT_DATASET_PATH);
-            }
-            System.out.println("Nombre total d'attributs: " + numAttributes);
-            System.out.println("Attribut de classe: " + className +
-                            " (index " + classIndex + ")");
-
-            System.out.println("\n=== ATTRIBUTS DISPONIBLES ===");
-            for (int i = 0; i < numAttributes; i++) {
-                if (i == classIndex) {
-                    System.out.println("[Classe] " + wekaHeader.attribute(i).name() +
-                                      " - Type: " + (wekaHeader.attribute(i).isNominal() ? "Nominal" : "Numérique") +
-                                      (wekaHeader.attribute(i).isNominal() ?
-                                      " - Valeurs possibles: " + wekaHeader.attribute(i).numValues() : ""));
-
-                    if (wekaHeader.attribute(i).isNominal()) {
-                        System.out.print("   Valeurs de classes: ");
-                        for (int j = 0; j < wekaHeader.attribute(i).numValues(); j++) {
-                            System.out.print(wekaHeader.attribute(i).value(j));
-                            if (j < wekaHeader.attribute(i).numValues() - 1) System.out.print(", ");
-                        }
-                        System.out.println();
-                    }
-                } else {
-                    System.out.println("Attribut " + i + ": " + wekaHeader.attribute(i).name() +
-                                      " - Type: " + (wekaHeader.attribute(i).isNominal() ? "Nominal" : "Numérique") +
-                                      (wekaHeader.attribute(i).isNominal() ?
-                                      " - Valeurs possibles: " + wekaHeader.attribute(i).numValues() : ""));
-
-                    // Afficher les valeurs possibles pour les attributs nominaux, surtout après discrétisation
-                    if (wekaHeader.attribute(i).isNominal() && stage.equals("APRÈS DISCRÉTISATION")) {
-                        System.out.print("   Valeurs: ");
-                        int maxValuesToShow = Math.min(10, wekaHeader.attribute(i).numValues()); // Limiter à 10 valeurs max
-                        for (int j = 0; j < maxValuesToShow; j++) {
-                            System.out.print(wekaHeader.attribute(i).value(j));
-                            if (j < maxValuesToShow - 1) System.out.print(", ");
-                        }
-                        if (wekaHeader.attribute(i).numValues() > maxValuesToShow) {
-                            System.out.print(", ... (+" + (wekaHeader.attribute(i).numValues() - maxValuesToShow) + " autres)");
-                        }
-                        System.out.println();
-                    }
-
-                    if (wekaHeader.attribute(i).isNominal()) numNominal++;
-                    else numNumeric++;
-                }
-            }
-        }
-        else if (header instanceof com.yahoo.labs.samoa.instances.InstancesHeader) {
-            com.yahoo.labs.samoa.instances.InstancesHeader samoaHeader = (com.yahoo.labs.samoa.instances.InstancesHeader) header;
-            numAttributes = samoaHeader.numAttributes();
-            classIndex = samoaHeader.classIndex();
-            if (classIndex >= 0) {
-                className = samoaHeader.classAttribute().name();
-            }
-
-            System.out.println("\n=== INFORMATIONS SUR LE JEU DE DONNÉES (" + stage + ") ===");
-            if (stage.equals("ORIGINAL")) {
-                System.out.println("Fichier: " + DEFAULT_DATASET_PATH);
-            }
-            System.out.println("Nombre total d'attributs: " + numAttributes);
-            System.out.println("Attribut de classe: " + className +
-                            " (index " + classIndex + ")");
-
-            System.out.println("\n=== ATTRIBUTS DISPONIBLES ===");
-            for (int i = 0; i < numAttributes; i++) {
-                if (i == classIndex) {
-                    System.out.println("[Classe] " + samoaHeader.attribute(i).name() +
-                                      " - Type: " + (samoaHeader.attribute(i).isNominal() ? "Nominal" : "Numérique") +
-                                      (samoaHeader.attribute(i).isNominal() ?
-                                      " - Valeurs possibles: " + samoaHeader.attribute(i).numValues() : ""));
-
-                    if (samoaHeader.attribute(i).isNominal()) {
-                        System.out.print("   Valeurs de classes: ");
-                        for (int j = 0; j < samoaHeader.attribute(i).numValues(); j++) {
-                            System.out.print(samoaHeader.attribute(i).value(j));
-                            if (j < samoaHeader.attribute(i).numValues() - 1) System.out.print(", ");
-                        }
-                        System.out.println();
-                    }
-                } else {
-                    System.out.println("Attribut " + i + ": " + samoaHeader.attribute(i).name() +
-                                      " - Type: " + (samoaHeader.attribute(i).isNominal() ? "Nominal" : "Numérique") +
-                                      (samoaHeader.attribute(i).isNominal() ?
-                                      " - Valeurs possibles: " + samoaHeader.attribute(i).numValues() : ""));
-
-                    // Afficher les valeurs possibles pour les attributs nominaux, surtout après discrétisation
-                    if (samoaHeader.attribute(i).isNominal() && stage.equals("APRÈS DISCRÉTISATION")) {
-                        System.out.print("   Valeurs: ");
-                        int maxValuesToShow = Math.min(10, samoaHeader.attribute(i).numValues()); // Limiter à 10 valeurs max
-                        for (int j = 0; j < maxValuesToShow; j++) {
-                            System.out.print(samoaHeader.attribute(i).value(j));
-                            if (j < maxValuesToShow - 1) System.out.print(", ");
-                        }
-                        if (samoaHeader.attribute(i).numValues() > maxValuesToShow) {
-                            System.out.print(", ... (+" + (samoaHeader.attribute(i).numValues() - maxValuesToShow) + " autres)");
-                        }
-                        System.out.println();
-                    }
-
-                    if (samoaHeader.attribute(i).isNominal()) numNominal++;
-                    else numNumeric++;
-                }
-            }
-        }
-        else {
-            System.err.println("Type d'en-tête non pris en charge: " + header.getClass().getName());
-            return;
-        }
-
-        System.out.println("\nAttributs nominaux: " + numNominal);
-        System.out.println("Attributs numériques: " + numNumeric);
-
-        // Ajouter un résumé des intervalles pour les données discrétisées
-        if (stage.equals("APRÈS DISCRÉTISATION")) {
-            System.out.println("\n=== RÉSUMÉ DE LA DISCRÉTISATION ===");
-            System.out.println("Attributs numériques convertis en nominaux: " + numNominal);
-            System.out.println("Nombre moyen de valeurs par attribut nominal: " +
-                            calculateAverageValuesPerNominalAttribute(header));
-        }
-
-        if (numNominal == 0) {
-            System.out.println("\n⚠️ AVERTISSEMENT: Ce jeu de données ne contient pas d'attributs nominaux.");
-            System.out.println("Le classifieur CANC est conçu pour traiter des attributs nominaux.");
-            System.out.println("Les performances risquent d'être dégradées.");
-        }
-        System.out.println("==============================================\n");
-    }
-
-    /**
-     * Calcule le nombre moyen de valeurs possibles par attribut nominal
-     * @param header En-tête des attributs
-     * @return Moyenne des valeurs par attribut nominal
-     */
-    private static double calculateAverageValuesPerNominalAttribute(Object header) {
-        int totalValues = 0;
-        int nominalCount = 0;
-
-        if (header instanceof weka.core.Instances) {
-            weka.core.Instances wekaHeader = (weka.core.Instances) header;
-            int numAttributes = wekaHeader.numAttributes();
-            int classIndex = wekaHeader.classIndex();
-
-            for (int i = 0; i < numAttributes; i++) {
-                if (i != classIndex && wekaHeader.attribute(i).isNominal()) {
-                    totalValues += wekaHeader.attribute(i).numValues();
-                    nominalCount++;
-                }
-            }
-        }
-        else if (header instanceof com.yahoo.labs.samoa.instances.InstancesHeader) {
-            com.yahoo.labs.samoa.instances.InstancesHeader samoaHeader = (com.yahoo.labs.samoa.instances.InstancesHeader) header;
-            int numAttributes = samoaHeader.numAttributes();
-            int classIndex = samoaHeader.classIndex();
-
-            for (int i = 0; i < numAttributes; i++) {
-                if (i != classIndex && samoaHeader.attribute(i).isNominal()) {
-                    totalValues += samoaHeader.attribute(i).numValues();
-                    nominalCount++;
-                }
-            }
-        }
-
-        return nominalCount > 0 ? (double) totalValues / nominalCount : 0;
-    }
-
-    /**
-     * Méthode principale pour exécuter le test avec traitement batch instance par instance
-     *
-     * @param stream Flux de données à traiter
-     * @param variant Variante du classifieur CANC
-     * @param maxInstances Nombre maximum d'instances à traiter
-     * @param gracePeriod Période de grâce avant l'apprentissage
-     * @param enableReset Si vrai, le modèle sera réinitialisé périodiquement
-     */
-    private static void runBatchEvaluation(InstanceStream stream, Variant variant,
-                                          int maxInstances, int gracePeriod, boolean enableReset) {
-
-        System.out.println("\n=== DÉMARRAGE DU TEST EN MODE BATCH ===");
-        System.out.println("Source: Fichier ARFF");
-        System.out.println("Variante CANC: " + variant);
-        System.out.println("Instances à traiter: " + maxInstances);
-        System.out.println("Période de grâce: " + gracePeriod);
-        System.out.println("Reset activé: " + (enableReset ? "Oui" : "Non"));
-        System.out.println("=========================================\n");
-
-        // Créer et configurer le classifieur
-        CANCLearnerMOA classifier = new CANCLearnerMOA();
-        classifier.resetLearningImpl();
-
-        // Configurer la variante
-        switch (variant) {
-            case CpNC_COMV:
-                classifier.variantOption.setChosenIndex(0);
-                break;
-            case CpNC_CORV:
-                classifier.variantOption.setChosenIndex(1);
-                break;
-            case CaNC_COMV:
-                classifier.variantOption.setChosenIndex(2);
-                break;
-            case CaNC_CORV:
-                classifier.variantOption.setChosenIndex(3);
-                break;
-        }
-
-        // Configurer la période de grâce
-        classifier.gracePeriodOption.setValue(gracePeriod);
-
-        // Évaluateur global (sur toutes les instances)
-        BasicClassificationPerformanceEvaluator globalEvaluator = new BasicClassificationPerformanceEvaluator();
 
         // Variables de suivi
         int instancesProcessed = 0;
         long startTime = TimingUtils.getNanoCPUTimeOfCurrentThread();
+        int chunkNumber = 0;
+        int totalConcepts = 0;
+        int totalRules = 0;
 
-        // Message de démarrage
-        CANCDebugger.printTimestampedMessage("Démarrage de l'apprentissage avec " + variant);
+        // Structure pour stocker les instances du chunk courant
+        HashMap<Integer, Example<Instance>> currentChunk = new HashMap<>();
 
-        // Initialisation du flux et du classifieur
+        // Évaluateur global (pour mesurer la précision sur tous les chunks)
+        BasicClassificationPerformanceEvaluator globalEvaluator = new BasicClassificationPerformanceEvaluator();
+
+        // Initialisation du flux
         stream.restart();
-        classifier.setModelContext(stream.getHeader());
-        classifier.prepareForUse();
 
-        // En-tête pour les résultats intermédiaires
-        System.out.println("Instances\tPrécision\tTemps(s)\tNbRègles");
+        // En-tête pour les résultats intermédiaires (uniquement en mode debug)
+        if (isDebugEnabled) {
+            System.out.println("Chunk\tInstances\tPrécision\tTemps(s)\tNbConc.\tNbRègles");
+            System.out.println("-----\t---------\t---------\t--------\t-------\t--------");
+        }
 
-        // Boucle principale d'apprentissage - traitement instance par instance
+        // Boucle principale d'apprentissage - traitement par chunks
         while (stream.hasMoreInstances() && instancesProcessed < maxInstances) {
-            // Reset périodique si activé
-            if (instancesProcessed > 0 && enableReset &&
-                instancesProcessed % (maxInstances / DEFAULT_RESET_FREQUENCY) == 0) {
-                System.out.println("\n--- RESET du modèle à l'instance " + instancesProcessed + " ---");
-                classifier.resetLearning();
-                classifier.setModelContext(stream.getHeader());
-                classifier.prepareForUse();
+            // Collecter les instances pour le chunk courant (mini-dataset)
+            currentChunk.clear();
+            int chunkInstanceCount = 0;
+
+            while (chunkInstanceCount < chunkSize && stream.hasMoreInstances() && instancesProcessed < maxInstances) {
+                Example<Instance> example = stream.nextInstance();
+                currentChunk.put(chunkInstanceCount, example);
+                chunkInstanceCount++;
+                instancesProcessed++;
             }
 
-            // Récupérer la prochaine instance
-            Example<Instance> example = stream.nextInstance();
-            Instance instance = example.getData();
+            chunkNumber++;
 
-            // Test-then-train : prédiction avant apprentissage
-            double[] votes = classifier.getVotesForInstance(instance);
+            if (isDebugEnabled) {
+                System.out.println("\n=== TRAITEMENT DU CHUNK " + chunkNumber + " ===");
+                System.out.println("Nombre d'instances dans ce chunk: " + chunkInstanceCount);
+            }
 
-            // Évaluation de la performance
-            globalEvaluator.addResult(example, votes);
+            // Créer un NOUVEAU classifieur pour chaque chunk
+            // Cela garantit que chaque chunk est traité de manière totalement indépendante
+            CANCLearnerMOA classifier = new CANCLearnerMOA();
+            classifier.resetLearningImpl();
 
-            // Entraînement sur l'instance
-            classifier.trainOnInstance(instance);
+            // Configurer la variante
+            switch (variant) {
+                case CpNC_COMV:
+                    classifier.variantOption.setChosenIndex(0);
+                    break;
+                case CpNC_CORV:
+                    classifier.variantOption.setChosenIndex(1);
+                    break;
+                case CaNC_COMV:
+                    classifier.variantOption.setChosenIndex(2);
+                    break;
+                case CaNC_CORV:
+                    classifier.variantOption.setChosenIndex(3);
+                    break;
+            }
 
-            // Incrémenter le compteur
-            instancesProcessed++;
+            // Activer l'affichage des concepts
+            classifier.setDisplayConcepts(isDebugEnabled);
 
-            // Forcer la préparation du modèle (génération de règles) tous les gracePeriod instances
-            if (instancesProcessed % gracePeriod == 0) {
-                try {
-                    // Accéder à buildModel via réflexion puisque c'est une méthode privée
-                    java.lang.reflect.Method buildModelMethod =
-                        CANCLearnerMOA.class.getDeclaredMethod("buildModel");
-                    buildModelMethod.setAccessible(true);
-                    buildModelMethod.invoke(classifier);
-                } catch (Exception e) {
-                    System.err.println("Erreur lors de la construction forcée du modèle: " + e.getMessage());
+            // Réinitialiser le modèle pour ce chunk
+            classifier.setModelContext(stream.getHeader());
+            classifier.prepareForUse();
+
+            // Réinitialiser le flag pour afficher le gain d'information pour ce chunk
+            classifier.resetSelectionDetailsFlag();
+
+            // PHASE 1: Entrainement sur toutes les instances du chunk
+
+           /* // Afficher les instances de ce chunk avant le traitement
+            System.out.println("\n=== INSTANCES DU CHUNK " + chunkNumber + " ===");
+            for (Map.Entry<Integer, Example<Instance>> entry : currentChunk.entrySet()) {
+                Instance instance = entry.getValue().getData();
+                System.out.println("Instance " + entry.getKey() + ": " + instance.toString());
+            }*/
+
+            for (Map.Entry<Integer, Example<Instance>> entry : currentChunk.entrySet()) {
+                Instance instance = entry.getValue().getData();
+                classifier.trainOnInstance(instance);
+            }
+
+            // Forcer la génération du modèle
+            try {
+                java.lang.reflect.Method buildModelMethod =
+                    CANCLearnerMOA.class.getDeclaredMethod("buildModel");
+                buildModelMethod.setAccessible(true);
+                buildModelMethod.invoke(classifier);
+
+                // Afficher les gains d'information après la génération du modèle
+                // comme demandé, seulement si le debug est activé
+                if (isDebugEnabled) {
+                    // Utiliser CANCDebugger au lieu de l'appel direct à la méthode
+                    CANCDebugger.printInformationGainDetails(classifier);
+
+                    // Afficher explicitement les détails de sélection des attributs et valeurs selon la variante
+                    System.out.println("\n=== DÉTAILS DE SÉLECTION D'ATTRIBUTS ET VALEURS POUR " + variant + " ===");
+                    CANCDebugger.printSelectionDetails(classifier);
+
+                    // Réinitialiser le flag après l'affichage pour permettre d'afficher les détails pour le prochain chunk
+                    CANCDebugger.resetSelectionDetailsFlag();
                 }
+            } catch (Exception e) {
+                System.err.println("Erreur lors de la construction du modèle: " + e.getMessage());
             }
 
-            // Afficher les statistiques intermédiaires à intervalle régulier
-            if (instancesProcessed % DISPLAY_FREQUENCY == 0) {
-                double accuracy = globalEvaluator.getFractionCorrectlyClassified();
-                int ruleCount = classifier.getRules().size();
-                double timeTaken = TimingUtils.nanoTimeToSeconds(
-                    TimingUtils.getNanoCPUTimeOfCurrentThread() - startTime);
+            // PHASE 2: Test sur les mêmes instances du chunk
+            for (Map.Entry<Integer, Example<Instance>> entry : currentChunk.entrySet()) {
+                Example<Instance> example = entry.getValue();
+                double[] votes = classifier.getVotesForInstance(example.getData());
+                globalEvaluator.addResult(example, votes);
+            }
 
-                System.out.printf("%d\t\t%.4f\t\t%.2f\t\t%d%n",
-                               instancesProcessed, accuracy, timeTaken, ruleCount);
+            // Récupérer la description des concepts
+            String conceptsDescription = CANCDebugger.getConceptsDescription(
+                classifier.getConcepts(),
+                classifier.getNominalContext(),
+                variant,
+                classifier.getMostPertinentAttribute(),
+                new ClosureOperator(classifier.getNominalContext())
+            );
+            List<Rule> currentRules = new ArrayList<>(classifier.getRules());
+
+            // Obtenir une description des concepts
+            int numConcepts = classifier.getNumberOfConcepts();
+
+            // Stocker la description des concepts et les règles du chunk courant
+            conceptDescriptionsByChunk.put(chunkNumber, conceptsDescription);
+            rulesByChunk.put(chunkNumber, currentRules);
+            totalConcepts += numConcepts;
+            totalRules += currentRules.size();
+
+            // Afficher les détails du chunk (uniquement en mode debug)
+            if (isDebugEnabled) {
+                // Afficher chaque concept du chunk courant avec ses règles
+                System.out.println("\n--- CONCEPTS ET RÈGLES DU CHUNK " + chunkNumber + " ---");
+                List<FormalConcept> concepts = classifier.getConcepts();
+                NominalContext context = classifier.getNominalContext();
+                com.lamsili.canc.rules.RuleExtractor extractor = new com.lamsili.canc.rules.RuleExtractor();
+                Map<FormalConcept, List<Rule>> conceptRules = extractor.extractRulesByConcept(concepts, context, CANCDebugger.isUseDisjointRules());
+                int idx = 1;
+                for (Map.Entry<FormalConcept, List<Rule>> entry : conceptRules.entrySet()) {
+                    FormalConcept concept = entry.getKey();
+                    List<Rule> rules = entry.getValue();
+                    System.out.println("Concept #" + idx + " :");
+                    System.out.println("  Intent : " + concept.getIntent());
+                    System.out.println("  Extent : " + concept.getExtent());
+                    for (Rule rule : rules) {
+                        System.out.println("    Règle : " + rule);
+                    }
+                    idx++;
+                }
+
+                // Afficher les statistiques intermédiaires par chunk
+                double accuracy = globalEvaluator.getFractionCorrectlyClassified();
+                double elapsedTime = TimingUtils.nanoTimeToSeconds(TimingUtils.getNanoCPUTimeOfCurrentThread() - startTime);
+
+                System.out.println(chunkNumber + "\t" + instancesProcessed + "\t" + df.format(accuracy) + "\t" +
+                                 df.format(elapsedTime) + "\t" + numConcepts + "\t" + currentRules.size());
+            } else if (chunkNumber % 5 == 0 || chunkNumber == 1) {
+                // Afficher uniquement les informations de progression en mode non-debug
             }
         }
 
         // Afficher les résultats finaux
-        double totalTime = TimingUtils.nanoTimeToSeconds(TimingUtils.getNanoCPUTimeOfCurrentThread() - startTime);
-        double globalAccuracy = globalEvaluator.getFractionCorrectlyClassified();
-        int finalRuleCount = classifier.getRules().size();
-
-        System.out.println("\n=== RÉSULTATS FINAUX ===");
+        // Toujours afficher les résultats, indépendamment de SHOW_FINAL_RESULTS
+        System.out.println("\n=== RÉSULTATS FINAUX (MODE CHUNK) ===");
+        System.out.println("Chunks traités: " + chunkNumber);
         System.out.println("Instances traitées: " + instancesProcessed);
-        System.out.println("Précision globale: " + df.format(globalAccuracy) + " (" +
-                         String.format("%.2f%%", globalAccuracy * 100) + ")");
-        System.out.println("Temps total: " + df.format(totalTime) + " secondes");
-        System.out.println("Vitesse: " + df.format(instancesProcessed / totalTime) + " instances/seconde");
-        System.out.println("Nombre de règles générées: " + finalRuleCount);
+        System.out.println("Précision globale: " + df.format(globalEvaluator.getFractionCorrectlyClassified()));
+        System.out.println("Nombre total de concepts générés: " + totalConcepts);
+        System.out.println("Nombre total de règles générées: " + totalRules);
 
-        // Afficher un résumé du modèle final
-        CANCDebugger.printDebugHeader("MODÈLE FINAL");
+        double elapsedTimeSeconds = TimingUtils.nanoTimeToSeconds(TimingUtils.getNanoCPUTimeOfCurrentThread() - startTime);
+        System.out.println("Temps total d'exécution: " + df.format(elapsedTimeSeconds) + " secondes");
+        System.out.println("Vitesse moyenne: " + df.format(instancesProcessed / elapsedTimeSeconds) + " instances/seconde");
 
-        // Afficher les règles si moins de 20
-        if (finalRuleCount < 20) {
-            StringBuilder modelInfo = new StringBuilder();
-            classifier.getModelDescription(modelInfo, 1);
-            System.out.println("Règles:");
-            System.out.println(modelInfo.toString());
-        } else {
-            System.out.println("(Trop de règles pour affichage)");
+        // Affichage détaillé des concepts et règles uniquement en mode debug
+        if (isDebugEnabled) {
+            // Afficher tous les concepts générés par chunk
+            System.out.println("\n=== TOUS LES CONCEPTS PAR CHUNK ===");
+            for (int i = 1; i <= chunkNumber; i++) {
+                String concepts = conceptDescriptionsByChunk.get(i);
+                System.out.println("\n--- CONCEPTS DU CHUNK " + i + " ---");
+                System.out.println(concepts);
+            }
         }
 
-        CANCDebugger.printDebugFooter();
+        // Toujours afficher les règles générées, car c'est le résultat principal
+        System.out.println("\n=== TOUTES LES RÈGLES GÉNÉRÉES PAR CHUNK ===");
+        for (int i = 1; i <= chunkNumber; i++) {
+            List<Rule> rules = rulesByChunk.get(i);
+            System.out.println("\n--- RÈGLES DU CHUNK " + i + " (" + rules.size() + " règles) ---");
+            displayRules(rules);
+        }
     }
 
     /**
-     * Applique un filtre de discrétisation sur les attributs numériques du flux
-     * et retourne un nouveau flux avec les attributs transformés en nominal
-     *
-     * @param stream Flux de données original
-     * @return Flux avec attributs numériques transformés en attributs nominaux
+     * Affiche les détails des règles d'association
+     * @param rules Liste des règles à afficher
      */
-    private static ArffFileStream applyDiscretizationFilter(ArffFileStream stream) {
-        // Si la discrétisation est désactivée, retourner le flux original sans modification
-        if (!m_DiscreteEnabled) {
-            System.out.println("\n=== DISCRÉTISATION DÉSACTIVÉE ===");
-            System.out.println("Le flux de données est utilisé tel quel, sans transformation.");
-            return stream;
+    private static void displayRules(List<Rule> rules) {
+        if (rules.isEmpty()) {
+            System.out.println("Aucune règle générée.");
+            return;
         }
 
-        System.out.println("\n=== APPLICATION DU FILTRE DE DISCRÉTISATION ===");
-        try {
-            // Récupérer les données d'en-tête du flux
-            Object header = stream.getHeader();
-            Instances originalData;
-
-            // Convertir le header MOA en Instances Weka si nécessaire
-            if (header instanceof com.yahoo.labs.samoa.instances.InstancesHeader) {
-                // Au lieu d'utiliser getFileDescription() qui n'existe pas, nous allons utiliser
-                // directement le fichier source du flux en utilisant un nouveau flux à partir du fichier original
-                String sourceFile = DEFAULT_DATASET_PATH; // Utiliser le chemin par défaut
-
-                // Créer une nouvelle instance Weka à partir du fichier
-                weka.core.converters.ArffLoader loader = new weka.core.converters.ArffLoader();
-                loader.setFile(new java.io.File(sourceFile));
-                originalData = loader.getDataSet();
-
-                // Définir l'index de la classe
-                int classIndex = stream.getHeader().classIndex();
-                if (classIndex >= 0) {
-                    originalData.setClassIndex(classIndex);
-                } else {
-                    originalData.setClassIndex(originalData.numAttributes() - 1);
-                }
-
-                System.out.println("Données chargées à partir de: " + sourceFile);
-            } else if (header instanceof weka.core.Instances) {
-                originalData = (weka.core.Instances) header;
-            } else {
-                throw new IllegalArgumentException("Type d'en-tête non pris en charge: " + header.getClass().getName());
-            }
-
-            // S'assurer que la classe cible n'est jamais discrétisée, même si elle est numérique
-            if (m_Filter instanceof Discretize) {
-                Discretize discretize = (Discretize) m_Filter;
-
-                // Forcer l'ignorance de la classe (qu'elle soit nominale ou numérique)
-                discretize.setIgnoreClass(true);
-
-                // Configurer le nombre de bins et le type de discrétisation
-                discretize.setBins(10); // Nombre d'intervalles
-                discretize.setUseEqualFrequency(true); // Utiliser des intervalles de fréquence égale
-
-                System.out.println("Type de filtre: " + m_Filter.getClass().getSimpleName());
-                System.out.println("Spécification: " + getFilterSpec());
-                System.out.println("Nombre de bins: " + discretize.getBins());
-                System.out.println("Mode fréquence égale: " + discretize.getUseEqualFrequency());
-                System.out.println("Classe préservée (non discrétisée): Oui");
-            } else {
-                System.out.println("Type de filtre: " + m_Filter.getClass().getSimpleName());
-                System.out.println("Spécification: " + getFilterSpec());
-                System.out.println("Classe préservée: Non spécifié");
-            }
-
-            // Initialiser le filtre avec les données
-            m_Filter.setInputFormat(originalData);
-
-            // Appliquer le filtre aux données
-            System.out.println("Application du filtre de discrétisation...");
-
-            // Transformer les données initiales (header) avec le filtre
-            Instances discretizedData = Filter.useFilter(originalData, m_Filter);
-
-            // Vérifier que la classe est bien du type attendu après filtrage
-            if (discretizedData.classIndex() >= 0) {
-                System.out.println("Type de l'attribut classe après discrétisation: " +
-                        (discretizedData.classAttribute().isNominal() ? "Nominal" : "Numérique"));
-            }
-
-            // Créer un nouveau fichier ARFF temporaire avec les données discrétisées
-            String tempFilePath = System.getProperty("java.io.tmpdir") + "/discretized_data.arff";
-            weka.core.converters.ArffSaver saver = new weka.core.converters.ArffSaver();
-            saver.setInstances(discretizedData);
-            saver.setFile(new java.io.File(tempFilePath));
-            saver.writeBatch();
-
-            System.out.println("Données discrétisées enregistrées temporairement dans: " + tempFilePath);
-
-            // Créer un nouveau flux à partir du fichier ARFF temporaire
-            ArffFileStream discretizedStream = new ArffFileStream(tempFilePath, originalData.classIndex());
-            discretizedStream.prepareForUse();
-
-            return discretizedStream;
-
-        } catch (Exception e) {
-            System.err.println("ERREUR lors de la discrétisation: " + e.getMessage());
-            e.printStackTrace();
-            // En cas d'erreur, retourner le flux original
-            return stream;
+        for (int i = 0; i < rules.size(); i++) {
+            Rule rule = rules.get(i);
+            // Afficher uniquement la règle formatée (toString() inclut déjà support, confidence et weight)
+            System.out.println("Règle " + (i+1) + ": " + rule.toString());
+            // La ligne redondante avec support et confiance a été supprimée
         }
     }
 }

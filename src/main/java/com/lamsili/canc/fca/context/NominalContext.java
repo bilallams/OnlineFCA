@@ -3,6 +3,7 @@ package com.lamsili.canc.fca.context;
 
 import com.yahoo.labs.samoa.instances.Instance;  // Utilisation de l'Instance de MOA via SAMOA
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class NominalContext {
     // List of instances added in order
@@ -71,7 +72,7 @@ public class NominalContext {
         // Retirer l'instance 0 qui est la plus ancienne
         Instance oldInstance = instances.remove(0);
 
-        // Mettre à jour les indices dans deltaIndex
+        // Pour chaque attribut nominal, retirer la référence à l'instance 0 et décaler tous les autres indices
         for (int i = 0; i < oldInstance.numAttributes(); i++) {
             if (i == oldInstance.classIndex() || !oldInstance.attribute(i).isNominal()) {
                 continue;
@@ -84,8 +85,15 @@ public class NominalContext {
             if (valueMap != null) {
                 Set<Integer> instanceIndices = valueMap.get(attrValue);
                 if (instanceIndices != null) {
-                    // Supprimer l'indice 0
-                    instanceIndices.remove(0);
+                    // Optimisation : utiliser removeIf pour supprimer et transformer en une seule passe
+                    Set<Integer> newIndices = new HashSet<>();
+                    instanceIndices.removeIf(idx -> {
+                        if (idx > 0) {
+                            newIndices.add(idx - 1); // Décrémente les indices > 0
+                        }
+                        return true; // Supprime tous les anciens indices
+                    });
+                    instanceIndices.addAll(newIndices);
 
                     // Si plus aucune instance n'a cette valeur, nettoyer
                     if (instanceIndices.isEmpty()) {
@@ -95,27 +103,6 @@ public class NominalContext {
                         }
                     }
                 }
-            }
-        }
-
-        // Décrémenter tous les indices restants car nous avons supprimé l'indice 0
-        updateAllIndices();
-    }
-
-    /**
-     * Met à jour tous les indices après suppression d'une instance
-     */
-    private void updateAllIndices() {
-        for (Map<String, Set<Integer>> valueMap : deltaIndex.values()) {
-            for (Set<Integer> indices : valueMap.values()) {
-                Set<Integer> newIndices = new HashSet<>();
-                for (Integer idx : indices) {
-                    if (idx > 0) {  // Ignorer l'indice 0 qui a été supprimé
-                        newIndices.add(idx - 1);  // Décrémenter l'indice
-                    }
-                }
-                indices.clear();
-                indices.addAll(newIndices);
             }
         }
     }
@@ -185,36 +172,6 @@ public class NominalContext {
     public void clear() {
         instances.clear();
         deltaIndex.clear();
-    }
-
-    /**
-     * Active ou désactive le fenêtrage et définit la taille de la fenêtre
-     * @param enable Activer ou non le fenêtrage
-     * @param maxSize Taille maximale de la fenêtre (si enable=true)
-     */
-    public void setWindowing(boolean enable, int maxSize) {
-        this.useWindowing = enable;
-        if (enable && maxSize > 0) {
-            this.maxInstances = maxSize;
-            // Si le nombre d'instances dépasse la taille max, supprimer les plus anciennes
-            while (instances.size() > maxInstances) {
-                removeOldestInstance();
-            }
-        }
-    }
-
-    /**
-     * @return La taille maximale de la fenêtre
-     */
-    public int getMaxInstances() {
-        return maxInstances;
-    }
-
-    /**
-     * @return Si le fenêtrage est activé
-     */
-    public boolean isWindowingEnabled() {
-        return useWindowing;
     }
 
     /**

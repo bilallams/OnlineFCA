@@ -18,9 +18,10 @@ public class RuleExtractor {
      *
      * @param concepts List of formal concepts
      * @param context Nominal context containing instances and their attributes
+     * @param useDisjointRules If true, generates disjoint rules (one per attribute)
      * @return List of extracted rules
      */
-    public List<Rule> extractRules(List<FormalConcept> concepts, NominalContext context) {
+    public List<Rule> extractRules(List<FormalConcept> concepts, NominalContext context, boolean useDisjointRules) {
         List<Rule> rules = new ArrayList<>();
         int totalInstances = context.getNumInstances();
 
@@ -33,26 +34,111 @@ public class RuleExtractor {
                 continue;
             }
 
-            // Convert the intent to conditions for the rule
-            Map<String, String> conditions = new HashMap<>();
-            for (Map.Entry<String, String> pair : concept.getIntent()) {
-                conditions.put(pair.getKey(), pair.getValue());
+            // Get the intent (attribute-value pairs) of the concept
+            Set<Map.Entry<String, String>> intentPairs = concept.getIntent();
+
+            if (useDisjointRules && !intentPairs.isEmpty()) {
+                // Mode règles disjointes : une règle par attribut
+                for (Map.Entry<String, String> pair : intentPairs) {
+                    Map<String, String> singleCondition = new HashMap<>();
+                    singleCondition.put(pair.getKey(), pair.getValue());
+
+                    // Calculate the support (size of the extent)
+                    int support = concept.getExtentSize();
+
+                    // Create the rule with initial weight 1.0 and support
+                    Rule rule = new Rule(singleCondition, majorityClass, 1.0, support);
+
+                    // Calculer et définir le poids comme le ratio de couverture (|extent| / |S|)
+                    double weight = support / (double) totalInstances;
+                    rule.setWeight(weight);
+
+                    rules.add(rule);
+                }
+            } else {
+                // Mode normal : une règle avec toutes les conditions
+                Map<String, String> conditions = new HashMap<>();
+                for (Map.Entry<String, String> pair : intentPairs) {
+                    conditions.put(pair.getKey(), pair.getValue());
+                }
+
+                // Calculate the support (size of the extent)
+                int support = concept.getExtentSize();
+
+                // Create the rule with initial weight 1.0 and support
+                Rule rule = new Rule(conditions, majorityClass, 1.0, support);
+
+                // Calculer et définir le poids comme le ratio de couverture (|extent| / |S|)
+                double weight = support / (double) totalInstances;
+                rule.setWeight(weight);
+
+                rules.add(rule);
             }
-
-            // Calculate the support (size of the extent)
-            int support = concept.getExtentSize();
-
-            // Create the rule with initial weight 1.0 and support
-            Rule rule = new Rule(conditions, majorityClass, 1.0, support);
-
-            // Calculer et définir le poids comme le ratio de couverture (|extent| / |S|)
-            double weight = support / (double) totalInstances;
-            rule.setWeight(weight);
-
-            rules.add(rule);
         }
 
         return rules;
+    }
+
+    /**
+     * Extracts rules from a list of formal concepts and a nominal context.
+     * This is a compatibility method that uses the default setting for disjoint rules (false).
+     *
+     * @param concepts List of formal concepts
+     * @param context Nominal context containing instances and their attributes
+     * @return List of extracted rules
+     */
+    public List<Rule> extractRules(List<FormalConcept> concepts, NominalContext context) {
+        return extractRules(concepts, context, false);
+    }
+
+    /**
+     * Extrait les règles pour chaque concept individuellement.
+     * Retourne une map liant chaque concept à la liste de ses règles extraites.
+     *
+     * @param concepts Liste des concepts formels
+     * @param context  Contexte nominal
+     * @param useDisjointRules Mode disjoint ou non
+     * @return Map de FormalConcept vers liste de Rule
+     */
+    public Map<FormalConcept, List<Rule>> extractRulesByConcept(List<FormalConcept> concepts, NominalContext context, boolean useDisjointRules) {
+        Map<FormalConcept, List<Rule>> conceptRules = new LinkedHashMap<>();
+        int totalInstances = context.getNumInstances();
+        for (FormalConcept concept : concepts) {
+            List<Rule> rules = new ArrayList<>();
+            String majorityClass = findMajorityClass(concept.getExtent(), context);
+            if (majorityClass == null) continue;
+            Set<Map.Entry<String, String>> intentPairs = concept.getIntent();
+            if (useDisjointRules && !intentPairs.isEmpty()) {
+                for (Map.Entry<String, String> pair : intentPairs) {
+                    Map<String, String> singleCondition = new HashMap<>();
+                    singleCondition.put(pair.getKey(), pair.getValue());
+                    int support = concept.getExtentSize();
+                    Rule rule = new Rule(singleCondition, majorityClass, 1.0, support);
+                    double weight = support / (double) totalInstances;
+                    rule.setWeight(weight);
+                    rules.add(rule);
+                }
+            } else {
+                Map<String, String> conditions = new HashMap<>();
+                for (Map.Entry<String, String> pair : intentPairs) {
+                    conditions.put(pair.getKey(), pair.getValue());
+                }
+                int support = concept.getExtentSize();
+                Rule rule = new Rule(conditions, majorityClass, 1.0, support);
+                double weight = support / (double) totalInstances;
+                rule.setWeight(weight);
+                rules.add(rule);
+            }
+            conceptRules.put(concept, rules);
+        }
+        return conceptRules;
+    }
+
+    /**
+     * Surcharge : mode non-disjoint par défaut.
+     */
+    public Map<FormalConcept, List<Rule>> extractRulesByConcept(List<FormalConcept> concepts, NominalContext context) {
+        return extractRulesByConcept(concepts, context, false);
     }
 
     /**

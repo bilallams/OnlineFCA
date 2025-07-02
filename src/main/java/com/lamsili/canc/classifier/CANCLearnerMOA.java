@@ -1,12 +1,15 @@
 package com.lamsili.canc.classifier;
 
 import com.lamsili.canc.fca.closure.ClosureOperator;
+import com.lamsili.canc.fca.closure.ClosureOperator.AttributeEvalMethod;
+import com.lamsili.canc.fca.closure.ClosureOperator.ValueEvalMethod;
 import com.lamsili.canc.fca.concept.FormalConcept;
 import com.lamsili.canc.fca.context.NominalContext;
 import com.lamsili.canc.rules.Rule;
 import com.lamsili.canc.rules.RuleExtractor;
 import com.lamsili.canc.varriants.NCACoupleSelector;
 import com.lamsili.canc.varriants.Variant;
+import com.lamsili.canc.app.CANCDebugger;
 
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.MultiClassClassifier;
@@ -28,7 +31,7 @@ import java.util.*;
  */
 public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClassifier {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 1546L;
 
     // Options MOA
     public IntOption gracePeriodOption = new IntOption("gracePeriod", 'g',
@@ -55,6 +58,31 @@ public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClas
     public FlagOption windowingOption = new FlagOption("useWindowing", 'u',
             "Activer le fenêtrage pour limiter la mémoire");
 
+    // Nouvelles options migrées de TestCANCStream
+    public FlagOption useDisjointRulesOption = new FlagOption("useDisjointRules", 'd',
+            "Activer la génération de règles disjointes");
+
+    public FlagOption debugOption = new FlagOption("debug", 'b',
+            "Activer le mode débogage pour afficher des informations détaillées");
+
+    public MultiChoiceOption attributeEvalOption = new MultiChoiceOption("attributeEvalMethod", 'a',
+            "Méthode d'évaluation des attributs",
+            new String[]{"INFORMATION_GAIN", "GAIN_RATIO"},
+            new String[]{
+                "Gain d'information: mesure la réduction d'entropie",
+                "Gain ratio: gain normalisé pour éviter le biais vers les attributs à valeurs multiples"
+            },
+            0);
+
+    public MultiChoiceOption valueEvalOption = new MultiChoiceOption("valueEvalMethod", 'e',
+            "Méthode d'évaluation des valeurs d'attributs",
+            new String[]{"ENTROPY", "SUPPORT"},
+            new String[]{
+                "Entropie: mesure le désordre/l'information",
+                "Support: mesure la fréquence d'apparition"
+            },
+            0);
+
     // Variables de l'algorithme
     private NominalContext context;
     private ClosureOperator closureOperator;
@@ -63,9 +91,11 @@ public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClas
     private RuleExtractor ruleExtractor;
     private Variant currentVariant;
 
+    // Variable pour stocker la description des concepts (évite les affichages redondants)
+    private String conceptsDescription = "";
+
     // Liste pour conserver les 10 premiers concepts générés
     private List<FormalConcept> firstConcepts = new ArrayList<>();
-    private boolean firstConceptsDisplayed = false;
 
     // Statistiques
     private int instancesSeen;
@@ -73,11 +103,41 @@ public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClas
     private int conceptsGenerated;
     private int rulesGenerated;
 
-    // Variable pour suivre si les détails de sélection ont déjà été affichés
-    private boolean selectionDetailsDisplayed = false;
+    // Variable pour contrôler l'affichage des concepts (éviter les doublons)
+    private boolean displayConcepts = true;
+
+    // Liste pour conserver les concepts générés du chunk courant
+    private List<FormalConcept> currentConcepts = new ArrayList<>();
+
+    /**
+     * Réinitialise le flag pour permettre l'affichage des détails de sélection
+     * Cela permet d'afficher à nouveau les informations de gain pour chaque chunk
+     */
+    public void resetSelectionDetailsFlag() {
+        // Déléguer à la méthode statique dans CANCDebugger
+        com.lamsili.canc.app.CANCDebugger.resetSelectionDetailsFlag();
+    }
 
     @Override
     public void resetLearningImpl() {
+        // Configurer CANCDebugger avec les options de MOA
+        com.lamsili.canc.app.CANCDebugger.setDebugEnabled(debugOption.isSet());
+        com.lamsili.canc.app.CANCDebugger.setUseDisjointRules(useDisjointRulesOption.isSet());
+
+        // Configurer la méthode d'évaluation des attributs
+        if (attributeEvalOption.getChosenIndex() == 0) {
+            com.lamsili.canc.app.CANCDebugger.setAttributeEvalMethod(AttributeEvalMethod.INFORMATION_GAIN);
+        } else {
+            com.lamsili.canc.app.CANCDebugger.setAttributeEvalMethod(AttributeEvalMethod.GAIN_RATIO);
+        }
+
+        // Configurer la méthode d'évaluation des valeurs
+        if (valueEvalOption.getChosenIndex() == 0) {
+            com.lamsili.canc.app.CANCDebugger.setValueEvalMethod(ValueEvalMethod.ENTROPY);
+        } else {
+            com.lamsili.canc.app.CANCDebugger.setValueEvalMethod(ValueEvalMethod.SUPPORT);
+        }
+
         // Initialiser le contexte avec la taille de fenêtre si elle est spécifiée
         if (windowingOption.isSet() && windowSizeOption.getValue() > 0) {
             this.context = new NominalContext(windowSizeOption.getValue());
@@ -149,35 +209,112 @@ public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClas
      * Construit le modèle en générant les concepts formels et en extrayant les règles.
      */
     private void buildModel() {
+        fcaTrain();
+    }
+
+    /**
+     * Méthode de formation FCA qui génère les concepts formels et extrait les règles.
+     * Cette méthode contient la logique principale de construction du modèle.
+     */
+    private void fcaTrain() {
+        // Réinitialiser le cache de debug pour ce nouveau chunk
+        com.lamsili.canc.app.CANCDebugger.resetDebugCache(instancesSeen);
+
+        // Réinitialiser le flag des détails de sélection pour permettre leur affichage
+        resetSelectionDetailsFlag();
+
+        // Afficher les détails de sélection d'attributs et valeurs avant la génération des concepts
+        if (com.lamsili.canc.app.CANCDebugger.isDebugEnabled()) {
+            com.lamsili.canc.app.CANCDebugger.handleSelectionDetails(this);
+        }
+
         // Générer les concepts formels
         List<FormalConcept> concepts = generateConcepts();
         conceptsGenerated = concepts.size();
+        // Stocker la liste complète des concepts du chunk courant
+        currentConcepts = concepts;
 
         // Stocker les 10 premiers concepts s'ils n'ont pas déjà été sauvegardés
         if (firstConcepts.isEmpty() && !concepts.isEmpty()) {
             // On limite à 10 concepts maximum
             int numToAdd = Math.min(concepts.size(), 10);
             firstConcepts.addAll(concepts.subList(0, numToAdd));
-
-            // Afficher ces concepts
-            printFirstConcepts();
         }
 
-        // Extraire les règles
-        rules = ruleExtractor.extractRules(concepts, context);
-        rulesGenerated = rules.size();
+        // Préparation des données de concepts pour l'affichage (à la place de l'affichage direct)
+        if (displayConcepts && com.lamsili.canc.app.CANCDebugger.isDebugEnabled()) {
+            // Construire une description de concepts au lieu d'afficher directement
+            StringBuilder conceptsDescription = new StringBuilder();
+            if (concepts != null && !concepts.isEmpty()) {
+                // Afficher l'entête pour les concepts du chunk courant
+                conceptsDescription.append("--- CONCEPTS ET RÈGLES DU CHUNK ").append(instancesSeen / gracePeriodOption.getValue()).append(" ---\n");
 
-        // Calculer le support et la confiance pour chaque règle
-        calculateRuleMetrics();
+                for (int i = 0; i < concepts.size(); i++) {
+                    FormalConcept concept = concepts.get(i);
+                    conceptsDescription.append("Concept #").append(i + 1).append(" :\n");
+                    conceptsDescription.append("  Intent : ").append(concept.getIntent()).append("\n");
+                    conceptsDescription.append("  Extent : ").append(concept.getExtent()).append("\n");
 
-        // Mettre à jour le compteur de modèles
+                    // On détermine l'attribut pertinent et sa valeur selon la variante
+                    if (currentVariant == Variant.CpNC_COMV || currentVariant == Variant.CpNC_CORV) {
+                        String pertinentAttribute = getMostPertinentAttribute();
+                        conceptsDescription.append("  Attribut pertinent : ").append(pertinentAttribute).append("\n");
+
+                        // Pour les valeurs pertinentes
+                        if (currentVariant == Variant.CpNC_COMV) {
+                            // Pour CpNC_COMV, la valeur pertinente est celle qui est dans l'intention pour cet attribut
+                            Set<Map.Entry<String, String>> intent = concept.getIntent();
+                            for (Map.Entry<String, String> pair : intent) {
+                                if (pair.getKey().equals(pertinentAttribute)) {
+                                    conceptsDescription.append("  Valeur pertinente : ").append(pair.getValue()).append("\n");
+                                    break;
+                                }
+                            }
+                        } else {
+                            // Pour CpNC_CORV, la valeur pertinente est celle déterminée par l'opérateur de fermeture
+                            conceptsDescription.append("  Valeur pertinente : ").append(getRelevantValue(pertinentAttribute)).append("\n");
+                        }
+                    }
+                    conceptsDescription.append("\n");
+                }
+            }
+            // Stockage de la description pour accès externe sans double affichage
+            this.conceptsDescription = conceptsDescription.toString();
+
+            // Afficher directement la description des concepts si le debug est activé
+            if (com.lamsili.canc.app.CANCDebugger.isDebugEnabled()) {
+                System.out.println(conceptsDescription.toString());
+            }
+        }
+
+        // Mettre à jour le dernier point de construction du modèle
         lastModelBuildSize = instancesSeen;
 
-        // Réinitialiser si nécessaire
-        if (resetOption.isSet()) {
-            context.clear();
-            closureOperator = new ClosureOperator(context);
-            coupleSelector = new NCACoupleSelector(context);
+        // Utiliser RuleExtractor pour extraire les règles à partir des concepts
+        // Transmettre le paramètre useDisjointRules depuis CANCDebugger
+        this.rules = ruleExtractor.extractRules(concepts, context,
+                    com.lamsili.canc.app.CANCDebugger.isUseDisjointRules());
+        this.rulesGenerated = rules.size();
+
+        // Calculer les métriques (support, confiance) pour les règles
+        calculateRuleMetrics();
+
+        // Debug: afficher les règles si le debug est activé
+        if (com.lamsili.canc.app.CANCDebugger.isDebugEnabled() && !rules.isEmpty()) {
+            StringBuilder rulesDescription = new StringBuilder();
+            for (int i = 0; i < rules.size(); i++) {
+                Rule rule = rules.get(i);
+                // Utiliser directement toString() qui inclut déjà les métriques complètes
+                rulesDescription.append("Règle ").append(i + 1).append(": ")
+                               .append(rule.toString())
+                               .append("\n");
+
+                // Les métriques (support, confidence, weight) sont déjà incluses dans rule.toString()
+                // Ne pas les ajouter à nouveau pour éviter la duplication
+            }
+
+            // On ne fait pas d'affichage direct, on utilise le CANCDebugger pour éviter les duplications
+            //com.lamsili.canc.app.CANCDebugger.printRules(rulesDescription.toString());
         }
     }
 
@@ -240,12 +377,9 @@ public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClas
             coupleSelector = new NCACoupleSelector(context);
         }
 
-        // Précalculer et stocker les attributs et valeurs pertinents avant de générer les concepts
-        // Cela garantit que ce calcul est fait une seule fois avant la génération
-        if (!selectionDetailsDisplayed) {
-            // Afficher les détails de la sélection d'attributs et valeurs selon la variante
-            printSelectionDetails();
-        }
+        // Utiliser la méthode handleSelectionDetails de CANCDebugger qui gère tout le processus
+        // d'affichage des détails de sélection et la gestion du flag
+        com.lamsili.canc.app.CANCDebugger.handleSelectionDetails(this);
 
         // Générer les concepts selon la variante
         switch (currentVariant) {
@@ -293,16 +427,20 @@ public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClas
             // Vérification supplémentaire contre les ensembles vides
             if (extent == null || extent.isEmpty()) continue;
 
-            // Vérifier la fermeture correcte
-            if (!isExtentClosed(extent)) continue;
+            // Calculer la fermeture de Galois de l'extension
+            Set<Integer> closedExtent = closureOperator.galoisClosure(extent);
+
+            // Si l'extension n'est pas égale à sa fermeture, elle n'est pas fermée
+            if (!extent.equals(closedExtent)) continue;
 
             // Éviter les duplications en utilisant TreeSet pour garantir une comparaison par contenu
-            TreeSet<Integer> sortedExtent = new TreeSet<>(extent);
+            TreeSet<Integer> sortedExtent = new TreeSet<>(closedExtent);
             if (generatedExtents.contains(sortedExtent)) continue;
             generatedExtents.add(sortedExtent);
 
-            // Créer le concept et l'ajouter à la liste
-            concepts.add(new FormalConcept(extent, closureOperator.phi(extent)));
+            // Créer le concept en utilisant l'extension fermée et son intention associée
+            Set<Map.Entry<String, String>> intent = closureOperator.phi(closedExtent);
+            concepts.add(new FormalConcept(closedExtent, intent));
         }
 
         return concepts;
@@ -328,11 +466,20 @@ public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClas
         // Calculer l'extension delta(attr, val)
         Set<Integer> extent = closureOperator.delta(pertinentAttribute, relevantValue);
 
-        // Vérifier la fermeture correcte
-        if (!isExtentClosed(extent)) return concepts;
+        // Vérification supplémentaire contre les ensembles vides
+        if (extent == null || extent.isEmpty()) return concepts;
 
-        // Créer le concept et l'ajouter à la liste
-        concepts.add(new FormalConcept(extent, closureOperator.phi(extent)));
+        // Calculer la fermeture de Galois de l'extension
+        Set<Integer> closedExtent = closureOperator.galoisClosure(extent);
+
+        // Si l'extension n'est pas égale à sa fermeture, elle n'est pas fermée
+        if (!extent.equals(closedExtent)) return concepts;
+
+        // Obtenir l'intention en utilisant phi sur l'extension fermée
+        Set<Map.Entry<String, String>> intent = closureOperator.phi(closedExtent);
+
+        // Créer le concept en utilisant l'extension fermée et son intention associée
+        concepts.add(new FormalConcept(closedExtent, intent));
         return concepts;
     }
 
@@ -356,15 +503,22 @@ public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClas
                 // Calculer l'extension delta(attr, val)
                 Set<Integer> extent = closureOperator.delta(pair.getKey(), pair.getValue());
 
-                // Vérifier la fermeture correcte
-                if (!isExtentClosed(extent)) continue;
+                // Vérification supplémentaire contre les ensembles vides
+                if (extent == null || extent.isEmpty()) continue;
 
-                // Éviter les duplications
-                if (generatedExtents.contains(extent)) continue;
-                generatedExtents.add(extent);
+                // Calculer la fermeture de Galois de l'extension
+                Set<Integer> closedExtent = closureOperator.galoisClosure(extent);
 
-                // Créer le concept et l'ajouter à la liste
-                concepts.add(new FormalConcept(extent, closureOperator.phi(extent)));
+                // Si l'extension n'est pas égale à sa fermeture, elle n'est pas fermée
+                if (!extent.equals(closedExtent)) continue;
+
+                // Éviter les duplications avec l'extension fermée
+                if (generatedExtents.contains(closedExtent)) continue;
+                generatedExtents.add(closedExtent);
+
+                // Créer le concept en utilisant l'extension fermée et son intention associée
+                Set<Map.Entry<String, String>> intent = closureOperator.phi(closedExtent);
+                concepts.add(new FormalConcept(closedExtent, intent));
             }
         }
 
@@ -402,54 +556,27 @@ public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClas
                 // Calculer l'extension delta(attr, val)
                 Set<Integer> extent = closureOperator.delta(attribute, relevantValue);
 
-                // Vérifier la fermeture correcte
-                if (!isExtentClosed(extent)) continue;
+                // Vérification supplémentaire contre les ensembles vides
+                if (extent == null || extent.isEmpty()) continue;
 
-                // Éviter les duplications
-                if (generatedExtents.contains(extent)) continue;
-                generatedExtents.add(extent);
+                // Calculer la fermeture de Galois de l'extension
+                Set<Integer> closedExtent = closureOperator.galoisClosure(extent);
 
-                // Créer le concept et l'ajouter à la liste
-                concepts.add(new FormalConcept(extent, closureOperator.phi(extent)));
+                // Étant donné que galoisClosure garantit déjà la validité de la fermeture,
+                // cette vérification devient redondante mais permet de filtrer les extensions non fermées
+                if (!extent.equals(closedExtent)) continue;
+
+                // Éviter les duplications avec l'extension fermée
+                if (generatedExtents.contains(closedExtent)) continue;
+                generatedExtents.add(closedExtent);
+
+                // Créer le concept en utilisant l'extension fermée et son intention associée
+                Set<Map.Entry<String, String>> intent = closureOperator.phi(closedExtent);
+                concepts.add(new FormalConcept(closedExtent, intent));
             }
         }
 
         return concepts;
-    }
-
-    /**
-     * Vérifie si un ensemble d'instances est fermé (extent = δ(φ(extent)))
-     * en utilisant uniquement delta et phi.
-     *
-     * @param extent L'ensemble d'instances à vérifier
-     * @return true si l'ensemble est fermé, false sinon
-     */
-    private boolean isExtentClosed(Set<Integer> extent) {
-        // Calculer les attributs-valeurs communs à toutes les instances de extent
-        Set<Map.Entry<String, String>> intent = closureOperator.phi(extent);
-
-        // Calculer l'extension de ces attributs-valeurs sans utiliser psi
-        // On commence avec toutes les instances
-        Set<Integer> closedExtent = new HashSet<>();
-        for (int i = 0; i < context.getNumInstances(); i++) {
-            closedExtent.add(i);
-        }
-
-        // Pour chaque paire attribut-valeur dans l'intent, intersecter avec delta
-        for (Map.Entry<String, String> pair : intent) {
-            Set<Integer> pairExtent = closureOperator.delta(pair.getKey(), pair.getValue());
-
-            // Garder uniquement les instances présentes dans les deux ensembles
-            closedExtent.retainAll(pairExtent);
-
-            // Optimisation: si le résultat est vide ou égal à extent, on peut s'arrêter
-            if (closedExtent.isEmpty() || closedExtent.equals(extent)) {
-                break;
-            }
-        }
-
-        // Vérifier si l'extent initial est égal à l'extent fermé
-        return extent.equals(closedExtent);
     }
 
     @Override
@@ -585,250 +712,18 @@ public class CANCLearnerMOA extends AbstractClassifier implements MultiClassClas
     }
 
     /**
-     * Obtenir une description textuelle des concepts générés
+     * Contrôle si les concepts formels doivent être affichés lors de la construction du modèle
      *
-     * @return Description des concepts
+     * @param display Si vrai, les concepts seront affichés
      */
-    public String getConceptsDescription() {
-        StringBuilder sb = new StringBuilder();
-
-        // Si pas de règles, retourner un message approprié
-        if (rules == null || rules.isEmpty()) {
-            sb.append("Aucun concept généré.");
-            return sb.toString();
-        }
-
-        for (int i = 0; i < rules.size(); i++) {
-            Rule rule = rules.get(i);
-            sb.append("Concept #").append(i+1).append(":\n");
-            sb.append("  Intent: ");
-
-            Map<String, String> conditions = rule.getConditions();
-            int count = 0;
-            for (Map.Entry<String, String> entry : conditions.entrySet()) {
-                if (count > 0) sb.append(", ");
-                sb.append(entry.getKey()).append("=").append(entry.getValue());
-                count++;
-            }
-
-            sb.append("\n  Class: ").append(rule.getPredictedClass());
-            sb.append("\n  Support: ").append(rule.getSupport());
-            sb.append("\n  Confidence: ").append(String.format("%.4f", rule.getConfidence()));
-            sb.append("\n  Weight: ").append(String.format("%.4f", rule.getWeight()));
-            sb.append("\n");
-        }
-
-        return sb.toString();
+    public void setDisplayConcepts(boolean display) {
+        this.displayConcepts = display;
     }
-
     /**
-     * Affiche les détails des 10 premiers concepts formels générés.
-     * Cette méthode affiche l'extension, l'intention, l'attribut pertinent et
-     * la valeur pertinente pour chaque concept.
+     * Retourne la liste des concepts générés pour le chunk courant.
      */
-    private void printFirstConcepts() {
-        if (firstConcepts.isEmpty() || firstConceptsDisplayed) {
-            return;
-        }
-
-        System.out.println("\n=== PREMIERS CONCEPTS FORMELS GÉNÉRÉS ===");
-        int count = 0;
-        for (FormalConcept concept : firstConcepts) {
-            if (count >= 10) break;  // Limiter à 10 concepts maximum
-
-            // Obtenir l'extension (ensemble d'instances)
-            Set<Integer> extent = concept.getExtent();
-
-            // Obtenir l'intention (attributs-valeurs)
-            Set<Map.Entry<String, String>> intent = concept.getIntent();
-
-            // Identifier l'attribut pertinent et sa valeur selon la variante
-            String pertinentAttribute = "";
-            String pertinentValue = "";
-
-            if (currentVariant == Variant.CpNC_COMV || currentVariant == Variant.CpNC_CORV) {
-                pertinentAttribute = getMostPertinentAttribute();
-                if (currentVariant == Variant.CpNC_COMV) {
-                    // Pour CpNC_COMV, la valeur pertinente est celle qui est dans l'intention pour cet attribut
-                    for (Map.Entry<String, String> pair : intent) {
-                        if (pair.getKey().equals(pertinentAttribute)) {
-                            pertinentValue = pair.getValue();
-                            break;
-                        }
-                    }
-                } else {
-                    // Pour CpNC_CORV, la valeur pertinente est celle déterminée par l'opérateur de fermeture
-                    pertinentValue = getRelevantValue(pertinentAttribute);
-                }
-            } else if (currentVariant == Variant.CaNC_COMV || currentVariant == Variant.CaNC_CORV) {
-                // Pour CaNC, chaque attribut peut être pertinent
-                // On peut marquer "multiple" ou choisir le premier de l'intention
-                if (!intent.isEmpty()) {
-                    Map.Entry<String, String> firstPair = intent.iterator().next();
-                    pertinentAttribute = firstPair.getKey();
-                    pertinentValue = firstPair.getValue();
-
-                    if (currentVariant == Variant.CaNC_CORV) {
-                        pertinentValue = getRelevantValue(pertinentAttribute);
-                    }
-                }
-            }
-
-            // Afficher les informations du concept
-            System.out.println("Concept #" + (count + 1));
-            System.out.println("Extension (instances) : " + extent);
-
-            System.out.print("Intention (attributs-valeurs) : [");
-            int i = 0;
-            for (Map.Entry<String, String> pair : intent) {
-                if (i > 0) System.out.print(", ");
-                System.out.print(pair.getKey() + "=" + pair.getValue());
-                i++;
-            }
-            System.out.println("]");
-
-            System.out.println("Attribut pertinent : " + pertinentAttribute);
-            System.out.println("Valeur pertinente : " + pertinentValue);
-            System.out.println();
-
-            count++;
-        }
-
-        System.out.println("========================================\n");
-        firstConceptsDisplayed = true;
-    }
-
-    /**
-     * Affiche les détails de la sélection d'attributs et valeurs selon la variante choisie.
-     * Pour les variantes CpNC_COMV et CaNC_COMV, affiche simplement les attributs et leurs valeurs.
-     * Pour les variantes CpNC_CORV et CaNC_CORV, affiche les attributs et leurs valeurs avec leur gain d'information.
-     * Ces informations ne sont affichées qu'une seule fois.
-     */
-    private void printSelectionDetails() {
-        // Ne pas afficher les informations si elles ont déjà été affichées
-        if (selectionDetailsDisplayed) {
-            return;
-        }
-
-        // Traitement spécifique selon la variante
-        switch (currentVariant) {
-            case CpNC_COMV:
-                System.out.println("\n=== Calcul du gain d'information ===");
-
-                // Afficher les scores d'information pour tous les attributs
-                Map<String, Double> attributeScores = getAttributeScores();
-                for (Map.Entry<String, Double> entry : attributeScores.entrySet()) {
-                    System.out.println("Gain d'information pour l'attribut '" + entry.getKey() + "' : "
-                            + String.format("%.2f", entry.getValue()));
-                }
-
-                System.out.println();
-                printAttributesWithAllValues();
-                break;
-            case CaNC_COMV:
-                // Pour CaNC_COMV, on n'affiche pas les gains d'information
-                printAttributesWithAllValues();
-                break;
-            case CpNC_CORV:
-                System.out.println("\n=== Calcul du gain d'information ===");
-
-                // Afficher les scores d'information pour tous les attributs
-                Map<String, Double> attributeScoresCpNC = getAttributeScores();
-                for (Map.Entry<String, Double> entry : attributeScoresCpNC.entrySet()) {
-                    System.out.println("Gain d'information pour l'attribut '" + entry.getKey() + "' : "
-                            + String.format("%.2f", entry.getValue()));
-                }
-
-                System.out.println();
-
-                // Pour CpNC_CORV, on affiche l'attribut sélectionné avec son score
-                String pertinentAttribute = getMostPertinentAttribute();
-                Double score = attributeScoresCpNC.get(pertinentAttribute);
-                System.out.println("Attribut sélectionné : " + pertinentAttribute +
-                        " (Gain d'information : " + String.format("%.2f", score) + ")");
-
-                System.out.println("\n=== Calcul du gain d'information pour chaque valeur pertinente ===");
-                printValueDetails(pertinentAttribute);
-                break;
-            case CaNC_CORV:
-                // Pour CaNC_CORV, on n'affiche pas les gains d'information pour les attributs
-                // mais on affiche les valeurs pertinentes pour chaque attribut
-                System.out.println("\n=== Calcul du gain d'information pour chaque valeur pertinente ===");
-                for (String attribute : getAttributeScores().keySet()) {
-                    printValueDetails(attribute);
-                }
-                break;
-        }
-
-        System.out.println("\n=== Affichage des concepts ===");
-
-        // Marquer que les détails ont été affichés
-        selectionDetailsDisplayed = true;
-    }
-
-    /**
-     * Affiche les attributs avec toutes leurs valeurs possibles pour les variantes CpNC_COMV et CaNC_COMV.
-     */
-    private void printAttributesWithAllValues() {
-        if (currentVariant == Variant.CpNC_COMV) {
-            // Pour CpNC_COMV, on affiche seulement l'attribut pertinent et ses valeurs
-            String pertinentAttribute = getMostPertinentAttribute();
-            Map<String, Set<Integer>> valuesMap = context.getDeltaIndex().get(pertinentAttribute);
-
-            if (valuesMap != null && !valuesMap.isEmpty()) {
-                System.out.println("Attribut pertinent sélectionné : " + pertinentAttribute);
-                System.out.print("Valeurs pertinentes pour " + pertinentAttribute + " : [");
-
-                int i = 0;
-                for (String value : valuesMap.keySet()) {
-                    if (i > 0) System.out.print(", ");
-                    System.out.print(value);
-                    i++;
-                }
-                System.out.println("] <-- selected");
-            }
-        }
-        // Pour CaNC_COMV, on n'affiche plus la liste complète des attributs et valeurs
-        // comme demandé dans la modification
-    }
-
-    /**
-     * Affiche les détails des valeurs pertinentes pour un attribut donné avec leur gain d'information.
-     *
-     * @param attribute L'attribut pour lequel afficher les valeurs pertinentes
-     */
-    private void printValueDetails(String attribute) {
-        // Obtenir les valeurs possibles pour cet attribut
-        Map<String, Set<Integer>> valuesMap = context.getDeltaIndex().get(attribute);
-        if (valuesMap == null || valuesMap.isEmpty()) return;
-
-        // Calculer le gain d'information pour chaque valeur
-        Map<String, Double> valueScores = new HashMap<>();
-        for (String value : valuesMap.keySet()) {
-            // Pour simplifier, on utilise la taille relative de l'extension comme mesure du gain
-            // Dans une implémentation réelle, un calcul plus sophistiqué serait utilisé
-            Set<Integer> extent = closureOperator.delta(attribute, value);
-            if (extent != null && !extent.isEmpty()) {
-                // Normaliser par rapport au nombre total d'instances
-                double score = (double) extent.size() / context.getNumInstances();
-                valueScores.put(value, score);
-            }
-        }
-
-        // Afficher le gain d'information pour chaque valeur
-        for (Map.Entry<String, Double> entry : valueScores.entrySet()) {
-            System.out.println("Valeur '" + entry.getKey() + "' : " +
-                    String.format("%.2f", entry.getValue()));
-        }
-
-        // Si on est dans une variante qui utilise la valeur pertinente
-        if (currentVariant == Variant.CpNC_CORV || currentVariant == Variant.CaNC_CORV) {
-            String relevantValue = getRelevantValue(attribute);
-            Double score = valueScores.get(relevantValue);
-            if (relevantValue != null && score != null) {
-                System.out.println("Valeur pertinente sélectionnée pour " + attribute + " : " +
-                        relevantValue + " (Gain d'information : " + String.format("%.2f", score) + ")");
-            }
-        }
+    public List<FormalConcept> getConcepts() {
+        return currentConcepts;
     }
 }
+

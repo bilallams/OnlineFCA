@@ -53,63 +53,37 @@ public class NCACoupleSelector {
     public Map<String, Double> getAttributeScores() {
         Map<String, Double> attributeScores = new HashMap<>();
 
-        // Puisque nous ne pouvons pas accéder directement à calculAttributeInformationGain,
-        // nous allons calculer une approximation du score pour chaque attribut
-
         if (context.getNumInstances() == 0) {
             return attributeScores;
         }
 
+        // Utiliser ClosureOperator pour calculer le vrai gain d'information (ou gain ratio si configuré)
+        ClosureOperator closure = new ClosureOperator(context);
+
         // Récupérer tous les attributs nominaux
         Instance firstInstance = context.getInstance(0);
-        Set<String> nominalAttributes = new HashSet<>();
 
+        // Pour chaque attribut nominal, calculer le gain d'information réel
         for (int i = 0; i < firstInstance.numAttributes(); i++) {
             if (i == firstInstance.classIndex() || !firstInstance.attribute(i).isNominal()) {
                 continue;
             }
 
-            nominalAttributes.add(firstInstance.attribute(i).name());
-        }
+            String attributeName = firstInstance.attribute(i).name();
 
-        // Pour chaque attribut nominal, calculer un score basé sur la pertinence de ses valeurs
-        for (String attribute : nominalAttributes) {
-            ClosureOperator closure = new ClosureOperator(context);
-            double totalScore = 0.0;
-            int valueCount = 0;
+            // Utiliser la méthode d'évaluation configurée (IG ou GR)
+            ClosureOperator.AttributeEvalMethod evalMethod =
+                com.lamsili.canc.app.CANCDebugger.getAttributeEvalMethod();
 
-            // Collecter toutes les valeurs uniques de cet attribut
-            Map<String, Set<Integer>> valueMap = new HashMap<>();
-            for (int i = 0; i < context.getNumInstances(); i++) {
-                Instance instance = context.getInstance(i);
-                for (int j = 0; j < instance.numAttributes(); j++) {
-                    if (instance.attribute(j).name().equals(attribute) && instance.attribute(j).isNominal()) {
-                        String value = instance.attribute(j).value((int) instance.value(j));
-                        valueMap.computeIfAbsent(value, k -> new HashSet<>()).add(i);
-                    }
-                }
+            double score;
+            if (evalMethod == ClosureOperator.AttributeEvalMethod.GAIN_RATIO) {
+                score = closure.calculateGainRatio(i);
+            } else {
+                // Utiliser une méthode publique pour calculer le gain d'information
+                score = closure.calculateAttributeInfoGain(i);
             }
 
-            // Calculer un score pour chaque valeur et faire la moyenne
-            for (String value : valueMap.keySet()) {
-                double score = closure.calculateRelevanceScore(attribute, value);
-                totalScore += score;
-                valueCount++;
-            }
-
-            // Utiliser la moyenne des scores de pertinence des valeurs comme approximation
-            double averageScore = valueCount > 0 ? totalScore / valueCount : 0.0;
-            attributeScores.put(attribute, averageScore);
-        }
-
-        // Identifions l'attribut le plus informatif selon ClosureOperator
-        ClosureOperator closure = new ClosureOperator(context);
-        String mostInformative = closure.getMostInformativeAttribute();
-
-        // Si nous avons trouvé l'attribut le plus informatif, donnons-lui un score légèrement plus élevé
-        if (mostInformative != null && attributeScores.containsKey(mostInformative)) {
-            double maxScore = attributeScores.values().stream().max(Double::compare).orElse(0.0);
-            attributeScores.put(mostInformative, maxScore * 1.1); // 10% de plus que le meilleur score
+            attributeScores.put(attributeName, score);
         }
 
         return attributeScores;
@@ -122,33 +96,9 @@ public class NCACoupleSelector {
      */
     public String getMostPertinentAttribute() {
         ClosureOperator closure = new ClosureOperator(context);
-        return closure.getMostInformativeAttribute();
+        return closure.getMostInformativeAttribute(com.lamsili.canc.app.CANCDebugger.getAttributeEvalMethod());
     }
 
-    /**
-     * Retourne tous les couples attribut-valeur nominaux d'une instance.
-     * Méthode utilitaire utilisée par d'autres méthodes.
-     *
-     * @param instance L'instance à analyser
-     * @return Ensemble des couples attribut-valeur
-     */
-    private Set<Map.Entry<String, String>> allNominalPairs(Instance instance) {
-        Set<Map.Entry<String, String>> pairs = new HashSet<>();
-
-        // Pour chaque attribut nominal
-        for (int i = 0; i < instance.numAttributes(); i++) {
-            if (i == instance.classIndex() || !instance.attribute(i).isNominal()) {
-                continue;
-            }
-
-            String attributeName = instance.attribute(i).name();
-            String attributeValue = instance.attribute(i).value((int) instance.value(i));
-
-            pairs.add(new AbstractMap.SimpleEntry<>(attributeName, attributeValue));
-        }
-
-        return pairs;
-    }
 
     /**
      * Implémente la variante CpNC_COMV (Algorithm 1)
@@ -165,7 +115,7 @@ public class NCACoupleSelector {
         ClosureOperator closure = new ClosureOperator(context);
 
         // 1. Trouver l'attribut avec le gain d'information maximal (a*)
-        String mostInformativeAttribute = closure.getMostInformativeAttribute();
+        String mostInformativeAttribute = closure.getMostInformativeAttribute(com.lamsili.canc.app.CANCDebugger.getAttributeEvalMethod());
 
         // Ensemble de résultat qui contiendra les intents des concepts (couples attribut-valeur)
         Set<Map.Entry<String, String>> resultPairs = new HashSet<>();
@@ -216,7 +166,7 @@ public class NCACoupleSelector {
         ClosureOperator closure = new ClosureOperator(context);
 
         // 1. Trouver l'attribut avec le gain d'information maximal (a*)
-        String mostInformativeAttribute = closure.getMostInformativeAttribute();
+        String mostInformativeAttribute = closure.getMostInformativeAttribute(com.lamsili.canc.app.CANCDebugger.getAttributeEvalMethod());
 
         // 2. Trouver la valeur la plus pertinente (v*) pour cet attribut
         String mostRelevantValue = closure.getMostRelevantValue(mostInformativeAttribute);
