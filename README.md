@@ -85,8 +85,8 @@ Le fichier JAR sera généré dans le dossier `target/`.
 ### Intégration avec MOA
 
 1. Compilez le projet avec Maven pour générer le JAR
-2.  Ajoutez le JAR généré dans le classpath de MOA 
-3.Lancez l'interface MOA ou utilisez MOA en ligne de commande
+2. Ajoutez le JAR généré dans le classpath de MOA 
+3. Lancez l'interface MOA ou utilisez MOA en ligne de commande
 4. Sélectionnez `CANCLearnerMOA` comme classifieur dans l'évaluateur de flux
 
 ### Configuration des Hyperparamètres
