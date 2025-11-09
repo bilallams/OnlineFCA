@@ -4,6 +4,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.io.Serializable;
 
 /**
  * Represents a formal concept in Formal Concept Analysis (FCA).
@@ -11,7 +12,10 @@ import java.util.Set;
  * extent is a set of instance indices and intent is a set of
  * attribute-value pairs common to these instances.
  */
-public class FormalConcept {
+public class FormalConcept implements Serializable {
+    // Ajouter un serialVersionUID pour la stabilité de la sérialisation
+    private static final long serialVersionUID = 1L;
+
     private final Set<Integer> extent;
     private final Set<Map.Entry<String, String>> intent;
 
@@ -24,6 +28,28 @@ public class FormalConcept {
     public FormalConcept(Set<Integer> extent, Set<Map.Entry<String, String>> intent) {
         this.extent = new HashSet<>(extent);
         this.intent = new HashSet<>(intent);
+    }
+
+    /**
+     * Adds an instance index to the concept's extent.
+     * This is used when incrementally updating concepts.
+     *
+     * @param instanceIndex The index of the instance to add
+     * @return true if the extent was modified, false otherwise
+     */
+    public boolean addToExtent(int instanceIndex) {
+        return this.extent.add(instanceIndex);
+    }
+
+    /**
+     * Removes an instance index from the concept's extent.
+     * This is used when removing instances that are no longer valid.
+     *
+     * @param instanceIndex The index of the instance to remove
+     * @return true if the extent was modified, false otherwise
+     */
+    public boolean removeFromExtent(int instanceIndex) {
+        return this.extent.remove(instanceIndex);
     }
 
     /**
@@ -52,6 +78,22 @@ public class FormalConcept {
      */
     public int getIntentSize() {
         return intent.size();
+    }
+
+    /**
+     * Remappe les indices de l'extension en utilisant une table de correspondance (index échantillon -> index original).
+     * @param sampleToOriginal liste où sampleToOriginal[i] = index original de l'instance i de l'échantillon
+     */
+    public void remapExtentIndices(java.util.List<Integer> sampleToOriginal) {
+        if (sampleToOriginal == null || sampleToOriginal.isEmpty()) return;
+        java.util.Set<Integer> newSet = new java.util.HashSet<>();
+        for (Integer idx : new java.util.HashSet<>(extent)) { // snapshot
+            if (idx != null && idx >= 0 && idx < sampleToOriginal.size()) {
+                newSet.add(sampleToOriginal.get(idx));
+            }
+        }
+        extent.clear();
+        extent.addAll(newSet);
     }
 
     @Override

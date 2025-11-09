@@ -6,6 +6,7 @@ import com.yahoo.labs.samoa.instances.Instances;
 import com.yahoo.labs.samoa.instances.Attribute;
 
 import java.util.*;
+import java.io.Serializable;
 
 // Import des classes Weka pour les calculs d'information et l'analyse d'attributs
 import weka.core.ContingencyTables;
@@ -17,13 +18,15 @@ import weka.filters.supervised.attribute.AttributeSelection;
 import weka.filters.unsupervised.attribute.Remove;
 import com.yahoo.labs.samoa.instances.SamoaToWekaInstanceConverter;
 
-public class ClosureOperator {
+public class ClosureOperator implements Serializable {
+    // Ajouter un serialVersionUID pour la stabilité de la sérialisation
+    private static final long serialVersionUID = 1L;
 
     private final NominalContext context;
     // Convertisseur pour utiliser les fonctions de Weka si nécessaire
     private final SamoaToWekaInstanceConverter converter;
     // Cache pour l'en-tête Weka construit à partir du contexte MOA
-    private weka.core.Instances wekaHeader = null;
+    private transient weka.core.Instances wekaHeader = null;
 
     /**
      * Constructor: we inject the nominal context containing the instances.
@@ -165,7 +168,7 @@ public class ClosureOperator {
         debugInfo.put("entropy", entropy);
 
         // Utiliser la méthode correcte de CANCDebugger
-        com.lamsili.canc.app.CANCDebugger.printAttributeValueDebug(attribute + "=" + value, debugInfo);
+        com.lamsili.canc.app.CANCDebugger.printAttributeEvalDebug(attribute + "=" + value, debugInfo);
 
         // Retourner l'entropie (plus c'est bas, plus c'est pertinent)
         return entropy;
@@ -193,7 +196,7 @@ public class ClosureOperator {
             for (int j = 0; j < instance.numAttributes(); j++) {
                 if (instance.attribute(j).name().equals(attribute) && instance.attribute(j).isNominal()) {
                     String value = instance.attribute(j).value((int) instance.value(j));
-                    valueMap.computeIfAbsent(value, _ -> new HashSet<>()).add(i);
+                    valueMap.computeIfAbsent(value, val -> new HashSet<>()).add(i);
                 }
             }
         }
@@ -318,7 +321,7 @@ public class ClosureOperator {
                     break;
                 case INFORMATION_GAIN:
                 default:
-                    score = calculateAttributeInformationGain(attIndex);
+                    score = calculateAttributeInfoGain(attIndex);
                     break;
             }
 
@@ -332,23 +335,13 @@ public class ClosureOperator {
     }
 
     /**
-     * Méthode publique pour calculer le gain d'information d'un attribut
-     * à utiliser depuis d'autres classes
+     * Calcule le gain d'information pour un attribut donné en utilisant la formule:
+     * IG(Class,Attribute) = H(Class) - H(Class|Attribute)
      *
      * @param attributeIndex L'index de l'attribut
      * @return Le gain d'information pour cet attribut
      */
     public double calculateAttributeInfoGain(int attributeIndex) {
-        return calculateAttributeInformationGain(attributeIndex);
-    }
-
-    /** method 07
-     * Calculates the information gain for a given attribute using Weka's InfoGainAttributeEval
-     *
-     * @param attributeIndex The attribute index
-     * @return The information gain for this attribute
-     */
-    private double calculateAttributeInformationGain(int attributeIndex) {
         try {
             // Vérifier que l'index d'attribut est valide
             if (attributeIndex < 0 || context.getNumInstances() == 0) {
@@ -484,16 +477,6 @@ public class ClosureOperator {
             debugInfo.put("wekaClassIndex", wekaInstances.classIndex());
             debugInfo.put("gainRatio", gainRatio);
 
-            // Format simplifié du gain ratio - éviter les affichages redondants
-            if (com.lamsili.canc.app.CANCDebugger.isDebugEnabled()) {
-                String attributeName = moaReference.attribute(attributeIndex).name();
-                // Vérifier si cette information a déjà été affichée
-                if (!com.lamsili.canc.app.CANCDebugger.hasDisplayedInfoGain(attributeName, gainRatio)) {
-                    System.out.printf("Gain ratio pour l'attribut '%s' : %.4f%n",
-                                    attributeName, gainRatio);
-                }
-            }
-
             // Afficher les informations de débogage détaillées via le debugger
             com.lamsili.canc.app.CANCDebugger.printAttributeEvalDebug("GainRatio", debugInfo);
 
@@ -534,25 +517,6 @@ public class ClosureOperator {
 
         // Utiliser directement la méthode de Weka pour plus de cohérence
         return ContingencyTables.entropy(distribution);
-    }
-
-    /**
-     * Calculation of the entropy of a distribution using Weka's entropy method
-     *
-     * @param distribution Collection of distribution values
-     * @param sum Total sum of values in the distribution (not used with Weka's method)
-     * @return The entropy of the distribution
-     */
-    public static double calculateEntropy(Collection<Double> distribution, double sum) {
-        // Convertir la collection en tableau
-        double[] distArray = new double[distribution.size()];
-        int i = 0;
-        for (Double d : distribution) {
-            distArray[i++] = d != null ? d : 0.0;
-        }
-
-        // Utiliser la méthode existante
-        return calculateEntropy(distArray, sum);
     }
 
     /**
@@ -738,6 +702,7 @@ public class ClosureOperator {
 
         // Calculer le support (nombre d'occurrences)
         double support = matchCount;
+        double supportRatio = (double) matchCount / context.getNumInstances();
 
         // Map pour stocker la distribution des classes pour cette valeur (pour le débogage)
         Map<String, Integer> classDistribution = new HashMap<>();
@@ -756,12 +721,13 @@ public class ClosureOperator {
         Map<String, Object> debugInfo = new HashMap<>();
         debugInfo.put("instanceCount", matchCount);
         debugInfo.put("totalInstances", context.getNumInstances());
-        debugInfo.put("frequency", (double) matchCount / context.getNumInstances());
-        debugInfo.put("support", support);
+        debugInfo.put("frequency", supportRatio);
+        debugInfo.put("nombreOccurrences", matchCount);
+        debugInfo.put("support", String.format("%d (%.3f)", matchCount, supportRatio) + " [support = |δ("+attribute+"="+value+")| / |S| = " + matchCount + "/" + context.getNumInstances() + "]");
         debugInfo.put("classDistribution", classDistribution);
 
         // Utiliser la méthode correcte de CANCDebugger
-        com.lamsili.canc.app.CANCDebugger.printAttributeValueDebug(attribute + "=" + value + " (support)", debugInfo);
+        com.lamsili.canc.app.CANCDebugger.printAttributeEvalDebug(attribute + "=" + value + " (nombre d'occurrences: " + matchCount + ", support: " + String.format("%.3f", supportRatio) + ")", debugInfo);
 
         return support;
     }

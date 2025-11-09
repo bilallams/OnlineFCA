@@ -5,12 +5,16 @@ import com.lamsili.canc.fca.closure.ClosureOperator;
 import com.yahoo.labs.samoa.instances.Instance;
 
 import java.util.*;
+import java.io.Serializable;
 
 /**
  * Classe responsable de la sélection des couples attribut-valeur selon
  * la variante de l'algorithme choisie.
  */
-public class NCACoupleSelector {
+public class NCACoupleSelector implements Serializable {
+    // Ajouter un serialVersionUID pour la stabilité de la sérialisation
+    private static final long serialVersionUID = 1L;
+
     private final NominalContext context;
 
     /**

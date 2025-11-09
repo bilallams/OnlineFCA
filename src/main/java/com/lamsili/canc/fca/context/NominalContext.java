@@ -3,11 +3,18 @@ package com.lamsili.canc.fca.context;
 
 import com.yahoo.labs.samoa.instances.Instance;  // Utilisation de l'Instance de MOA via SAMOA
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import moa.core.Utils;
+import java.io.Serializable;
 
-public class NominalContext {
+public class NominalContext implements Serializable {
+    // Ajouter un serialVersionUID pour la stabilité de la sérialisation
+    private static final long serialVersionUID = 1L;
+
     // List of instances added in order
     private final List<Instance> instances;
+
+    // List of instance weights (parallel to instances)
+    private final List<Double> instanceWeights;
 
     // Delta index: attribute -> (value -> set of instance indices)
     private final Map<String, Map<String, Set<Integer>>> deltaIndex;
@@ -18,6 +25,7 @@ public class NominalContext {
 
     public NominalContext() {
         this.instances = new ArrayList<>();
+        this.instanceWeights = new ArrayList<>();
         this.deltaIndex = new HashMap<>();
     }
 
@@ -40,6 +48,7 @@ public class NominalContext {
     public void addInstance(Instance instance) {
         int idx = instances.size();
         instances.add(instance);
+        instanceWeights.add(1.0); // Poids par défaut de 1.0
 
         // Update delta index for each nominal attribute
         for (int i = 0; i < instance.numAttributes(); i++) {
@@ -52,8 +61,8 @@ public class NominalContext {
 
             // Update index for this attribute-value pair
             deltaIndex
-                .computeIfAbsent(attrName, _ -> new HashMap<>())
-                .computeIfAbsent(attrValue, _ -> new HashSet<>())
+                .computeIfAbsent(attrName, k -> new HashMap<>())
+                .computeIfAbsent(attrValue, v -> new HashSet<>())
                 .add(idx);
         }
 
@@ -71,6 +80,7 @@ public class NominalContext {
 
         // Retirer l'instance 0 qui est la plus ancienne
         Instance oldInstance = instances.remove(0);
+        instanceWeights.remove(0); // Supprimer le poids associé
 
         // Pour chaque attribut nominal, retirer la référence à l'instance 0 et décaler tous les autres indices
         for (int i = 0; i < oldInstance.numAttributes(); i++) {
@@ -171,6 +181,7 @@ public class NominalContext {
      */
     public void clear() {
         instances.clear();
+        instanceWeights.clear();
         deltaIndex.clear();
     }
 
@@ -180,5 +191,63 @@ public class NominalContext {
      */
     public Map<String, Map<String, Set<Integer>>> getDeltaIndex() {
         return deltaIndex;
+    }
+
+    /**
+     * Définir le poids d'une instance spécifique
+     * @param idx Index de l'instance
+     * @param weight Nouveau poids
+     */
+    public void setInstanceWeight(int idx, double weight) {
+        if (idx < 0 || idx >= instanceWeights.size()) {
+            throw new IndexOutOfBoundsException("Invalid instance index: " + idx);
+        }
+        instanceWeights.set(idx, weight);
+    }
+
+    /**
+     * Obtenir le poids d'une instance spécifique
+     * @param idx Index de l'instance
+     * @return Le poids de l'instance
+     */
+    public double getInstanceWeight(int idx) {
+        if (idx < 0 || idx >= instanceWeights.size()) {
+            throw new IndexOutOfBoundsException("Invalid instance index: " + idx);
+        }
+        return instanceWeights.get(idx);
+    }
+
+    /**
+     * Normalise les poids de toutes les instances pour que leur somme soit égale à 1.
+     * Cela garantit que les instances ont une influence proportionnelle dans l'apprentissage.
+     */
+    public void normalizeWeights() {
+        if (instanceWeights.isEmpty()) return;
+
+        // Calculer la somme totale des poids
+        double totalWeight = 0.0;
+        for (Double weight : instanceWeights) {
+            totalWeight += weight;
+        }
+
+        // Éviter la division par zéro
+        if (totalWeight <= 0.0) return;
+
+        // Normaliser chaque poids pour que la somme soit égale à 1
+        for (int i = 0; i < instanceWeights.size(); i++) {
+            instanceWeights.set(i, instanceWeights.get(i) / totalWeight);
+        }
+    }
+
+    /**
+     * Retourne la somme totale des poids des instances
+     * @return La somme des poids
+     */
+    public double getTotalWeight() {
+        double total = 0.0;
+        for (Double weight : instanceWeights) {
+            total += weight;
+        }
+        return total;
     }
 }
