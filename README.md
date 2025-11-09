@@ -2,19 +2,7 @@
 
 ## Description
 
-**OnlineFCA** est un classificateur de flux de données fondé sur l'Analyse de Concepts Formels (ACF/FCA - Formal Concept Analysis) qui maintient une couverture compacte de concepts et génère des règles SI-ALORS lisibles et traçables. Cette adaptation en ligne des CNC (Classifier Nominal Concepts) est conçue pour traiter des flux massifs de données sous contraintes de mémoire et de latence, tout en garantissant l'interprétabilité et l'explicabilité des décisions.
-
-Compatible avec le framework MOA (Massive Online Analysis), OnlineFCA répond aux exigences des secteurs critiques (finance, santé, sécurité publique, infrastructures) où la transparence des modèles est essentielle pour la confiance et la conformité.
-
-## Contexte
-
-La croissance des données issues de l'IoT, des réseaux sociaux et des journaux d'infrastructure impose des solutions d'apprentissage capables de :
-- Traiter des flux massifs non bornés
-- Gérer les dérives de concept (évolutions de P(X, y))
-- Fonctionner sous contraintes de mémoire O(M) et temps O(t) par instance
-- Fournir des modèles interprétables et explicables
-
-OnlineFCA comble la lacune entre performance et transparence en conciliant adaptation en temps réel et explicabilité.
+**OnlineFCA** est un classificateur de flux de données fondé sur l'Analyse de Concepts Formels (ACF/FCA - Formal Concept Analysis) 
 
 ## Caractéristiques Principales
 
